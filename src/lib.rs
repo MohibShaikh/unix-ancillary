@@ -25,13 +25,14 @@
 //! assert_eq!(fds.len(), 1);
 //! ```
 
-#![cfg(unix)]
+#[cfg(not(unix))]
+compile_error!("unix-ancillary only supports Unix platforms");
 
 mod ancillary;
 mod cmsg;
 mod ext;
 
-pub use ancillary::{AncillaryData, AncillaryError, ScmRights, SocketAncillary};
+pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
 pub use ext::{UnixDatagramExt, UnixStreamExt};
 
 use std::io;

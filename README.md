@@ -12,7 +12,6 @@ Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS file descriptor passing) 
 - **Automatic cleanup** — received FDs are `OwnedFd`, closed on drop
 - **macOS fd-leak protection** — detects kernel-level truncation and closes leaked FDs
 - **Ergonomic extension traits** — `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
-- **Optional tokio support** — async extension traits behind the `tokio` feature flag
 
 ## Quick Start
 

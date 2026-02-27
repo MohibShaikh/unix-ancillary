@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::os::unix::io::{BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::io::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::{fmt, mem};
 
 /// Error returned when the ancillary buffer is too small.
@@ -52,8 +52,6 @@ impl Iterator for ScmRights<'_> {
         Some(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 }
-
-use std::os::unix::io::FromRawFd;
 
 /// Iterator over control messages in an ancillary buffer.
 pub struct Messages<'a> {
@@ -200,6 +198,7 @@ impl<'a> SocketAncillary<'a> {
     }
 
     /// Returns `true` if the ancillary data was truncated during receive.
+    #[must_use]
     pub fn is_truncated(&self) -> bool {
         self.truncated
     }

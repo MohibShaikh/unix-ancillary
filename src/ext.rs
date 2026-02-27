@@ -65,16 +65,18 @@ impl UnixStreamExt for UnixStream {
 }
 
 /// Extension trait for `UnixDatagram` adding fd-passing convenience methods.
+///
+/// The socket must be connected (via `connect()`) before using `send_fds`.
 pub trait UnixDatagramExt {
-    /// Send data and file descriptors over the datagram socket.
-    fn send_fds_to(&self, data: &[u8], fds: &[impl AsFd], path: &std::path::Path) -> io::Result<usize>;
+    /// Send data and file descriptors over a connected datagram socket.
+    fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
 
     /// Receive data and up to `N` file descriptors from the datagram socket.
     fn recv_fds<const N: usize>(&self) -> io::Result<(usize, Vec<u8>, Vec<OwnedFd>)>;
 }
 
 impl UnixDatagramExt for UnixDatagram {
-    fn send_fds_to(&self, data: &[u8], fds: &[impl AsFd], _path: &std::path::Path) -> io::Result<usize> {
+    fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
 
         let mut buf = vec![0u8; SocketAncillary::buffer_size_for_rights(borrowed.len())];
