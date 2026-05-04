@@ -102,10 +102,9 @@ pub trait UnixStreamExt {
 
     /// Receive data and up to `N` file descriptors.
     ///
-    /// Allocates an internal data buffer of
-    /// [`DEFAULT_STREAM_BUF`](self::DEFAULT_STREAM_BUF) bytes plus an
-    /// oversized cmsg buffer that prevents kernel-level fd leaks. Surplus
-    /// fds beyond `N` are closed automatically.
+    /// Allocates an internal 4 KiB data buffer plus an oversized cmsg buffer
+    /// that prevents kernel-level fd leaks. Surplus fds beyond `N` are
+    /// closed automatically.
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds`](Self::recv_fds) but writes data into a
@@ -147,10 +146,9 @@ pub trait UnixDatagramExt {
 
     /// Receive data and up to `N` fds.
     ///
-    /// Allocates an internal data buffer of
-    /// [`DEFAULT_DATAGRAM_BUF`](self::DEFAULT_DATAGRAM_BUF) bytes plus an
-    /// oversized cmsg buffer that prevents kernel-level fd leaks. Surplus
-    /// fds beyond `N` are closed automatically.
+    /// Allocates an internal 64 KiB data buffer plus an oversized cmsg
+    /// buffer that prevents kernel-level fd leaks. Surplus fds beyond `N`
+    /// are closed automatically.
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds`](Self::recv_fds) but writes data into a
