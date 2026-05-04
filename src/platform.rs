@@ -26,6 +26,16 @@ mod inner {
     pub(crate) fn cloexec_received(_buf: &[u8]) -> io::Result<()> {
         Ok(())
     }
+
+    /// Maximum number of fds the kernel can possibly deliver in one
+    /// `SCM_RIGHTS` message. Linux hard-codes `SCM_MAX_FD = 253` and other
+    /// `MSG_CMSG_CLOEXEC`-supporting BSDs enforce comparable per-message
+    /// caps. Sizing the receive cmsg buffer to this value makes truncation
+    /// impossible.
+    #[inline]
+    pub(crate) fn max_recv_fds() -> usize {
+        253
+    }
 }
 
 #[cfg(not(any(
@@ -122,6 +132,42 @@ mod inner {
             }
         }
         Ok(())
+    }
+
+    /// Hard ceiling on the dynamic cap to bound buffer size against bogus or
+    /// `RLIM_INFINITY` values. 1M fds × 4 bytes ≈ 4 MiB cmsg buffer — far
+    /// above any realistic `RLIMIT_NOFILE` and well within reason for a
+    /// single recv call.
+    const HARD_CEILING: usize = 1 << 20;
+
+    /// Floor — never go below the Linux-style 253 cap so behaviour stays
+    /// consistent across platforms when `getrlimit` returns nonsense.
+    const HARD_FLOOR: usize = 253;
+
+    /// Maximum number of fds the kernel can deliver in one `SCM_RIGHTS`
+    /// message on this platform.
+    ///
+    /// On macOS the kernel does not enforce a fixed per-message fd cap;
+    /// instead it is bounded by the receiver's `RLIMIT_NOFILE` (the kernel
+    /// must allocate fd table entries for every delivered fd, and cannot
+    /// exceed that limit). We therefore size the receive cmsg buffer to
+    /// `RLIMIT_NOFILE` so truncation — and the resulting fd leak — is
+    /// kernel-impossible.
+    pub(crate) fn max_recv_fds() -> usize {
+        // SAFETY: getrlimit with a writable rlimit out-pointer is always
+        // defined; we treat any failure as "fall back to a safe default".
+        let mut rlim: libc::rlimit = unsafe { mem::zeroed() };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+        if rc < 0 {
+            return HARD_CEILING;
+        }
+        let cur = rlim.rlim_cur;
+        let n: usize = if cur == libc::RLIM_INFINITY {
+            HARD_CEILING
+        } else {
+            usize::try_from(cur).unwrap_or(HARD_CEILING)
+        };
+        n.clamp(HARD_FLOOR, HARD_CEILING)
     }
 }
 

@@ -4,20 +4,10 @@ use std::os::unix::net::{UnixDatagram, UnixStream};
 
 use crate::ancillary::{AncillaryData, SocketAncillary};
 use crate::cmsg;
+use crate::platform;
 
 const DEFAULT_STREAM_BUF: usize = 4096;
 const DEFAULT_DATAGRAM_BUF: usize = 65536;
-
-/// Conservative upper bound on fds in a single `SCM_RIGHTS` message.
-///
-/// Linux hard-codes `SCM_MAX_FD = 253` in the kernel; sendmsg fails with
-/// `EINVAL` past it. Other Unix kernels enforce comparable limits via
-/// `OPEN_MAX` or per-message caps. Sizing the receive ancillary buffer to
-/// this value makes truncation effectively impossible: the sender's kernel
-/// rejects oversized messages before they reach the wire. Even if a peer
-/// somehow delivered more, we surface it as a hard error rather than
-/// silently leaking fds — but in practice this branch is unreachable.
-const MAX_RECV_FDS: usize = 253;
 
 /// Result of a successful `recv_fds` call.
 ///
@@ -48,16 +38,23 @@ fn send_fds_impl(fd: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) -> io:
 
 /// Receive into `data_buf`, capping fds returned to the caller at `N`.
 ///
-/// The internal cmsg buffer is always sized for `max(N, MAX_RECV_FDS)` so the
-/// kernel cannot truncate under any realistic sender. Surplus fds (beyond
-/// `N`) are wrapped in `OwnedFd` and dropped before returning, closing them.
-/// If the kernel still reports `MSG_CTRUNC`, every fd we managed to extract
-/// is closed and an error is returned — the caller never sees partial state.
+/// The internal cmsg buffer is sized to a platform-specific upper bound that
+/// the kernel cannot exceed for a single `SCM_RIGHTS` message:
+///
+/// - Linux / *BSD: a fixed `SCM_MAX_FD = 253` per-message cap.
+/// - macOS: the receiver's current `RLIMIT_NOFILE`, since the kernel must
+///   allocate an fd table entry per delivered fd and cannot deliver more
+///   than the receiver can hold.
+///
+/// Truncation is therefore kernel-impossible. Surplus fds beyond `N` are
+/// wrapped in `OwnedFd` and dropped before returning, closing them. If the
+/// kernel still reports `MSG_CTRUNC` (defensive — should be unreachable),
+/// every fd we extracted is closed and an error is returned.
 fn recv_fds_into_impl<const N: usize>(
     fd: BorrowedFd<'_>,
     data_buf: &mut [u8],
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    let cap = N.max(MAX_RECV_FDS);
+    let cap = N.max(platform::max_recv_fds());
     let mut anc_buf = vec![0u8; SocketAncillary::buffer_size_for_rights(cap)];
 
     let mut iov = [io::IoSliceMut::new(data_buf)];

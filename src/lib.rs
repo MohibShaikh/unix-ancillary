@@ -17,15 +17,21 @@
 //!
 //! # Truncation safety
 //!
-//! Linux caps a single `SCM_RIGHTS` message at `SCM_MAX_FD = 253` fds; other
-//! Unix kernels enforce comparable caps. The high-level
-//! [`UnixStreamExt::recv_fds`] / [`UnixDatagramExt::recv_fds`] always allocate
-//! a cmsg buffer sized for that cap, regardless of the caller's `N`. Result:
+//! The high-level [`UnixStreamExt::recv_fds`] / [`UnixDatagramExt::recv_fds`]
+//! size the receive cmsg buffer to a platform-specific upper bound the kernel
+//! cannot exceed for a single `SCM_RIGHTS` message:
 //!
-//! - The peer's kernel rejects oversized sends before they hit the wire.
-//! - Every fd the kernel delivers becomes an `OwnedFd` we control.
-//! - If the kernel still reports `MSG_CTRUNC` (defensive path; should never
-//!   fire), every fd we extracted is closed and an error is returned.
+//! - **Linux / *BSD**: fixed `SCM_MAX_FD = 253`. The peer's kernel rejects
+//!   oversized sends with `EINVAL`.
+//! - **macOS**: the receiver's current `RLIMIT_NOFILE`, queried per recv
+//!   call. The kernel must allocate an fd table entry per delivered fd and
+//!   cannot exceed that limit.
+//!
+//! Result: truncation is kernel-impossible. Every fd the kernel delivers
+//! becomes an `OwnedFd` we control. Surplus fds beyond the caller's `N`
+//! are closed automatically. If the kernel still reports `MSG_CTRUNC`
+//! (defensive path; unreachable in practice), every fd we extracted is
+//! closed and an error is returned.
 //!
 //! Low-level callers using [`SocketAncillary`] manage their own buffer and
 //! must size it appropriately — the [`is_truncated`](SocketAncillary::is_truncated)

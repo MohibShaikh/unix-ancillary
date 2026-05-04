@@ -59,13 +59,17 @@ ancillary.add_fds(&[file.as_fd()]).unwrap();
 
 ## How fd-leak protection works
 
-Linux hard-codes `SCM_MAX_FD = 253` per `SCM_RIGHTS` message; other Unix
-kernels enforce comparable per-message caps. The high-level `recv_fds`
-allocates a cmsg buffer sized for that cap regardless of the caller's `N`.
-Result:
+The high-level `recv_fds` sizes the receive cmsg buffer to a platform-specific
+upper bound the kernel cannot exceed for a single `SCM_RIGHTS` message:
 
-- A peer cannot send more fds than our buffer can hold — their kernel rejects
-  the `sendmsg` first.
+- **Linux / *BSD**: fixed `SCM_MAX_FD = 253`. The peer's kernel rejects
+  oversized sends with `EINVAL` before they hit the wire.
+- **macOS**: the receiver's current `RLIMIT_NOFILE`, queried per recv call.
+  The kernel must allocate an fd table entry per delivered fd and physically
+  cannot exceed that limit.
+
+Result: truncation is kernel-impossible on every supported platform.
+
 - Every fd the receiving kernel deposits is wrapped in `OwnedFd` immediately.
 - Caller gets the first `N`; the rest drop and close on the spot. Zero leak.
 - If `MSG_CTRUNC` somehow fires anyway, every extracted fd is closed and an
