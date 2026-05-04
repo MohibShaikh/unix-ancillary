@@ -12,6 +12,7 @@ Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS file descriptor passing) 
 - **Automatic cleanup** — received FDs are `OwnedFd`, closed on drop
 - **No fd leaks on truncation** — the high-level API sizes the receive cmsg buffer past every Unix kernel's per-message fd cap. Surplus fds beyond the caller's `N` are auto-closed; truncation cannot leak fds into the process
 - **CLOEXEC errors surfaced** — if `fcntl(FD_CLOEXEC)` fails on macOS, every received fd is closed and the error is returned
+- **Fuzz-hardened parser** — bounds-checked `cmsg_len` walk and defensive fd validation; tens of millions of fuzz executions clean
 - **Ergonomic extension traits** — `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
 
 ## Quick Start
@@ -78,6 +79,27 @@ Result: truncation is kernel-impossible on every supported platform.
 Low-level callers using `SocketAncillary` directly manage their own buffer
 and must size it correctly; the `is_truncated()` flag is exposed for that
 path.
+
+## Hardening
+
+The cmsg parser is fuzzed with `cargo-fuzz` against arbitrary byte input. Two
+soundness fixes shipped in 0.2.2 from that effort:
+
+- `Messages::next` validates `cmsg_len` fits in the remaining buffer before
+  calling libc's `CMSG_NXTHDR` (which performs unchecked pointer arithmetic
+  on that field). Malformed cmsgs terminate the walk cleanly.
+- `ScmRights::next` skips negative fd values silently — kernels never deliver
+  them via `SCM_RIGHTS`, but the parser is now defensive against any byte
+  source.
+
+Neither path is reachable from a real `recvmsg`; the hardening protects
+against replay scenarios, shared-memory cmsg blobs, and similar non-kernel
+input. To run the harness:
+
+```bash
+cargo install cargo-fuzz
+cargo +nightly fuzz run parse_cmsg
+```
 
 ## CLOEXEC race on macOS
 

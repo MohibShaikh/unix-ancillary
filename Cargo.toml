@@ -1,6 +1,6 @@
 [package]
 name = "unix-ancillary"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS fd passing) with OwnedFd/BorrowedFd"
@@ -8,6 +8,7 @@ license = "MIT"
 repository = "https://github.com/MohibShaikh/unix-ancillary"
 keywords = ["unix", "socket", "fd-passing", "ancillary", "scm-rights"]
 categories = ["os::unix-apis", "network-programming"]
+exclude = ["/fuzz", "/target", "/.github"]
 
 [dependencies]
 libc = "0.2"

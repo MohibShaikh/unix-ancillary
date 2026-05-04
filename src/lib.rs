@@ -74,6 +74,9 @@ mod platform;
 pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
 pub use ext::{ReceivedFds, UnixDatagramExt, UnixStreamExt};
 
+#[doc(hidden)]
+pub use ancillary::__fuzz_parse;
+
 use std::io;
 use std::os::unix::io::BorrowedFd;
 

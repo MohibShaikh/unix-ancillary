@@ -46,18 +46,29 @@ impl Iterator for ScmRights<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let fd_size = mem::size_of::<RawFd>();
-        if self.offset + fd_size > self.data.len() {
-            return None;
+        loop {
+            if self.offset + fd_size > self.data.len() {
+                return None;
+            }
+            let mut fd_bytes = [0u8; mem::size_of::<RawFd>()];
+            fd_bytes.copy_from_slice(&self.data[self.offset..self.offset + fd_size]);
+            self.offset += fd_size;
+            let raw = RawFd::from_ne_bytes(fd_bytes);
+
+            // The kernel never delivers negative fd values via SCM_RIGHTS;
+            // any negative is malformed input. Skip silently rather than
+            // tripping `OwnedFd::from_raw_fd`'s precondition (which panics
+            // under debug assertions and is UB to violate).
+            if raw < 0 {
+                continue;
+            }
+
+            // SAFETY: the kernel just delivered this fd to us via recvmsg
+            // SCM_RIGHTS; we wrap it in OwnedFd immediately and the caller
+            // owns it from this point. Caller MUST iterate exactly once —
+            // see type docs.
+            return Some(unsafe { OwnedFd::from_raw_fd(raw) });
         }
-        let mut fd_bytes = [0u8; mem::size_of::<RawFd>()];
-        fd_bytes.copy_from_slice(&self.data[self.offset..self.offset + fd_size]);
-        self.offset += fd_size;
-        let raw = RawFd::from_ne_bytes(fd_bytes);
-        // SAFETY: the kernel just delivered this fd to us via recvmsg
-        // SCM_RIGHTS; we wrap it in OwnedFd immediately and the caller owns
-        // it from this point. Caller MUST iterate exactly once — see type
-        // docs.
-        Some(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 }
 
@@ -98,33 +109,68 @@ impl<'a> Iterator for Messages<'a> {
                 return None;
             }
 
-            // SAFETY: `current` is a valid cmsg pointer in the borrowed
-            // buffer; CMSG_DATA / CMSG_NXTHDR are defined for it.
+            // Compute buffer bounds once. Used to validate cmsg_len before
+            // calling CMSG_NXTHDR, which performs unchecked pointer
+            // arithmetic on (corrupted) cmsg_len in libc and would otherwise
+            // overflow on malformed input. Buffers reaching us from
+            // `recvmsg` are kernel-formatted, but defending against bogus
+            // input is cheap and protects fuzz/test/replay use cases.
+            let buf_start = self.msg.msg_control as usize;
+            #[allow(clippy::unnecessary_cast)]
+            let buf_end = buf_start.saturating_add(self.msg.msg_controllen as usize);
+            let cur_addr = self.current as usize;
+
+            // SAFETY: `current` is non-null and points inside the borrowed
+            // buffer (guaranteed by CMSG_FIRSTHDR/CMSG_NXTHDR contract);
+            // reading the header is sound.
             #[allow(clippy::unnecessary_cast)]
             // cmsg_len is size_t on Linux but socklen_t (u32) elsewhere
-            let (level, ty, data_ptr, data_len) = unsafe {
+            let (level, ty, data_ptr, data_len, well_formed) = unsafe {
                 let cmsg = &*self.current;
                 let data_ptr = libc::CMSG_DATA(self.current as *mut _);
-                let header_len = (data_ptr as usize).saturating_sub(self.current as usize);
+                let header_len = (data_ptr as usize).saturating_sub(cur_addr);
                 let total = cmsg.cmsg_len as usize;
-                // Defensive: if a malformed cmsg claims a length shorter
-                // than its own header, treat the data area as empty rather
-                // than wrap-around to a giant slice.
-                let data_len = total.saturating_sub(header_len);
-                let level = cmsg.cmsg_level;
-                let ty = cmsg.cmsg_type;
-                self.current = libc::CMSG_NXTHDR(&self.msg, self.current);
-                (level, ty, data_ptr, data_len)
+
+                // Bound `total` to the bytes remaining in the buffer from
+                // this cmsg's start. Anything claiming to extend past the
+                // buffer is malformed; we treat its data area as empty and
+                // refuse to walk further.
+                let remaining = buf_end.saturating_sub(cur_addr);
+                let well_formed = total >= header_len && total <= remaining;
+                let data_len = if well_formed { total - header_len } else { 0 };
+
+                (
+                    cmsg.cmsg_level,
+                    cmsg.cmsg_type,
+                    data_ptr,
+                    data_len,
+                    well_formed,
+                )
+            };
+
+            // Advance only if the current cmsg is well-formed: libc's
+            // CMSG_NXTHDR reads cmsg_len from the cmsghdr directly and would
+            // overflow pointer arithmetic on a corrupted value. If
+            // malformed, terminate the walk after handling the current
+            // entry's data slice.
+            self.current = if well_formed {
+                // SAFETY: cmsg_len fits in the buffer; CMSG_NXTHDR will
+                // either return a valid in-buffer pointer or null.
+                unsafe { libc::CMSG_NXTHDR(&self.msg, self.current) }
+            } else {
+                std::ptr::null()
             };
 
             if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
-                // SAFETY: data_ptr/data_len are bound by the cmsg header
-                // values which the kernel produced. The lifetime ties back
-                // to the buffer borrowed by Messages<'a>.
+                // SAFETY: data_ptr is in-buffer; data_len is bounded by
+                // the buffer end via the well-formed check above. Lifetime
+                // ties to the buffer borrowed by Messages<'a>.
                 let data: &'a [u8] = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
                 return Some(AncillaryData::ScmRights(ScmRights::new(data)));
             }
-            // Unknown cmsg type — skip and continue walking.
+            // Unknown cmsg type — skip and continue walking. If we marked
+            // `current` null above (malformed), the next loop iteration
+            // returns None.
         }
     }
 }
@@ -242,4 +288,23 @@ impl<'a> SocketAncillary<'a> {
         self.length = 0;
         self.truncated = false;
     }
+}
+
+/// Internal entry point for fuzz harnesses. Walks an arbitrary byte buffer
+/// as if it were a kernel-formatted ancillary buffer.
+///
+/// **Not a stable API.** Hidden from rustdoc and not covered by the crate's
+/// semver guarantees.
+///
+/// # Safety
+///
+/// The iterator returned will produce `OwnedFd` values for any non-negative
+/// integer it finds in the SCM_RIGHTS data area. If those integers are not
+/// fds the caller exclusively owns, dropping the resulting `OwnedFd`s will
+/// close arbitrary descriptors in the process. Callers must either own
+/// every fd value present in `buf`, or wrap each yielded `OwnedFd` in
+/// `ManuallyDrop` before letting it drop.
+#[doc(hidden)]
+pub unsafe fn __fuzz_parse(buf: &[u8]) -> Messages<'_> {
+    Messages::new(buf, buf.len())
 }
