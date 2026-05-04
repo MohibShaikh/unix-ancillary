@@ -7,20 +7,17 @@ use unix_ancillary::{AncillaryData, SocketAncillary, UnixStreamExt};
 fn send_recv_single_fd() {
     let (tx, rx) = UnixStream::pair().unwrap();
 
-    let file = tempfile::tempfile().unwrap();
-    // Write something so we can verify the received fd works
-    let mut file = file;
+    let mut file = tempfile::tempfile().unwrap();
     file.write_all(b"hello from fd").unwrap();
     file.flush().unwrap();
 
     tx.send_fds(b"msg", &[&file]).unwrap();
 
-    let (n, data, fds) = rx.recv_fds::<1>().unwrap();
-    assert_eq!(&data[..n], b"msg");
-    assert_eq!(fds.len(), 1);
+    let recv = rx.recv_fds::<1>().unwrap();
+    assert_eq!(&recv.data[..], b"msg");
+    assert_eq!(recv.fds.len(), 1);
 
-    // Verify the received fd is valid and points to the same file
-    let mut received_file: std::fs::File = fds.into_iter().next().unwrap().into();
+    let mut received_file: std::fs::File = recv.fds.into_iter().next().unwrap().into();
     use std::io::Seek;
     received_file.seek(std::io::SeekFrom::Start(0)).unwrap();
     let mut contents = String::new();
@@ -38,9 +35,9 @@ fn send_recv_multiple_fds() {
 
     tx.send_fds(b"multi", &[&f1, &f2, &f3]).unwrap();
 
-    let (n, data, fds) = rx.recv_fds::<3>().unwrap();
-    assert_eq!(&data[..n], b"multi");
-    assert_eq!(fds.len(), 3);
+    let recv = rx.recv_fds::<3>().unwrap();
+    assert_eq!(&recv.data[..], b"multi");
+    assert_eq!(recv.fds.len(), 3);
 }
 
 #[test]
@@ -50,17 +47,46 @@ fn owned_fd_closes_on_drop() {
     let file = tempfile::tempfile().unwrap();
     tx.send_fds(b"x", &[&file]).unwrap();
 
-    let (_n, _data, fds) = rx.recv_fds::<1>().unwrap();
-    let received_raw = fds[0].as_raw_fd();
+    let recv = rx.recv_fds::<1>().unwrap();
+    let received_raw = recv.fds[0].as_raw_fd();
 
-    // Drop the received fds
-    drop(fds);
+    drop(recv);
 
-    // The received fd should now be closed — trying to use it should fail
+    // SAFETY: probing whether the fd is still open via fcntl.
     unsafe {
         let ret = libc::fcntl(received_raw, libc::F_GETFD);
         assert_eq!(ret, -1, "fd should be closed after OwnedFd drop");
     }
+}
+
+#[test]
+fn recv_fds_into_with_user_buffer() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"into", &[&file]).unwrap();
+
+    let mut buf = [0u8; 16];
+    let (n, fds) = rx.recv_fds_into::<1>(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"into");
+    assert_eq!(fds.len(), 1);
+}
+
+#[test]
+fn surplus_fds_dropped_not_leaked() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+
+    let f1 = tempfile::tempfile().unwrap();
+    let f2 = tempfile::tempfile().unwrap();
+    let f3 = tempfile::tempfile().unwrap();
+
+    tx.send_fds(b"trunc", &[&f1, &f2, &f3]).unwrap();
+
+    // Caller asks for one fd; peer sent three. The cmsg buffer is sized to
+    // the kernel cap so all three are wrapped in OwnedFd. We keep one and
+    // drop the surplus, closing those two fds.
+    let recv = rx.recv_fds::<1>().unwrap();
+    assert_eq!(recv.fds.len(), 1);
+    assert_eq!(&recv.data[..], b"trunc");
 }
 
 #[test]
@@ -69,7 +95,6 @@ fn low_level_api() {
 
     let file = tempfile::tempfile().unwrap();
 
-    // Send using low-level API
     let mut buf = [0u8; 64];
     let mut ancillary = SocketAncillary::new(&mut buf);
     ancillary.add_fds(&[file.as_fd()]).unwrap();
@@ -77,14 +102,14 @@ fn low_level_api() {
     let iov = [std::io::IoSlice::new(b"low-level")];
     unix_ancillary::cmsg_sendmsg(tx.as_fd(), &iov, &ancillary).unwrap();
 
-    // Receive using low-level API
     let mut data_buf = [0u8; 64];
     let mut anc_buf = [0u8; 64];
     let mut recv_anc = SocketAncillary::new(&mut anc_buf);
     let mut iov = [std::io::IoSliceMut::new(&mut data_buf)];
-    let n = unix_ancillary::cmsg_recvmsg(rx.as_fd(), &mut iov, &mut recv_anc).unwrap();
+    let result = unix_ancillary::cmsg_recvmsg(rx.as_fd(), &mut iov, &mut recv_anc).unwrap();
 
-    assert_eq!(&data_buf[..n], b"low-level");
+    assert_eq!(&data_buf[..result.bytes_read], b"low-level");
+    assert!(!result.truncated);
 
     let mut fd_count = 0;
     for msg in recv_anc.messages() {
@@ -107,7 +132,7 @@ fn buffer_size_calculation() {
 
 #[test]
 fn ancillary_buffer_too_small() {
-    let mut buf = [0u8; 1]; // Too small
+    let mut buf = [0u8; 1];
     let mut ancillary = SocketAncillary::new(&mut buf);
     let file = tempfile::tempfile().unwrap();
     assert!(ancillary.add_fds(&[file.as_fd()]).is_err());

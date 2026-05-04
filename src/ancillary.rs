@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::os::unix::io::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::{fmt, mem};
 
 /// Error returned when the ancillary buffer is too small.
@@ -16,14 +16,20 @@ impl std::error::Error for AncillaryError {}
 
 /// Received ancillary data from a Unix socket.
 pub enum AncillaryData<'a> {
-    /// A set of file descriptors received via `SCM_RIGHTS`.
+    /// File descriptors received via `SCM_RIGHTS`.
     ScmRights(ScmRights<'a>),
 }
 
 /// Iterator over file descriptors received via `SCM_RIGHTS`.
 ///
-/// Each returned `OwnedFd` takes ownership of the received file descriptor
-/// and will close it on drop.
+/// Each yielded `OwnedFd` takes ownership of one received descriptor and
+/// closes it on drop.
+///
+/// # Important
+///
+/// Iterate this exactly once. Iterating the same `Messages`/`ScmRights` view
+/// twice would manufacture two `OwnedFd`s for the same raw fd, leading to a
+/// double-close.
 pub struct ScmRights<'a> {
     data: &'a [u8],
     offset: usize,
@@ -47,8 +53,10 @@ impl Iterator for ScmRights<'_> {
         fd_bytes.copy_from_slice(&self.data[self.offset..self.offset + fd_size]);
         self.offset += fd_size;
         let raw = RawFd::from_ne_bytes(fd_bytes);
-        // SAFETY: The kernel just gave us this fd via recvmsg SCM_RIGHTS.
-        // We wrap it in OwnedFd immediately so it will be closed on drop.
+        // SAFETY: the kernel just delivered this fd to us via recvmsg
+        // SCM_RIGHTS; we wrap it in OwnedFd immediately and the caller owns
+        // it from this point. Caller MUST iterate exactly once — see type
+        // docs.
         Some(unsafe { OwnedFd::from_raw_fd(raw) })
     }
 }
@@ -62,10 +70,13 @@ pub struct Messages<'a> {
 
 impl<'a> Messages<'a> {
     fn new(buffer: &'a [u8], length: usize) -> Self {
+        // SAFETY: zeroed msghdr followed by explicit field init.
         let mut msg: libc::msghdr = unsafe { mem::zeroed() };
         msg.msg_control = buffer.as_ptr() as *mut libc::c_void;
         msg.msg_controllen = length as _;
 
+        // SAFETY: msg.msg_control points at `buffer` for `length` bytes;
+        // CMSG_FIRSTHDR walks that region per the cmsg(3) contract.
         let current = unsafe { libc::CMSG_FIRSTHDR(&msg) };
 
         Messages {
@@ -80,30 +91,46 @@ impl<'a> Iterator for Messages<'a> {
     type Item = AncillaryData<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current.is_null() {
-            return None;
-        }
-
-        unsafe {
-            let cmsg = &*self.current;
-            self.current = libc::CMSG_NXTHDR(&self.msg, self.current);
-
-            if cmsg.cmsg_level == libc::SOL_SOCKET && cmsg.cmsg_type == libc::SCM_RIGHTS {
-                let data_ptr = libc::CMSG_DATA(cmsg as *const _ as *mut _);
-                #[allow(clippy::unnecessary_cast)]
-                let data_len =
-                    cmsg.cmsg_len as usize - (data_ptr as usize - cmsg as *const _ as usize);
-                let data = std::slice::from_raw_parts(data_ptr, data_len);
-                Some(AncillaryData::ScmRights(ScmRights::new(data)))
-            } else {
-                // Skip unknown cmsg types
-                self.next()
+        // Loop instead of recursing on unknown cmsg types: an adversarial
+        // peer could otherwise force unbounded recursion.
+        loop {
+            if self.current.is_null() {
+                return None;
             }
+
+            // SAFETY: `current` is a valid cmsg pointer in the borrowed
+            // buffer; CMSG_DATA / CMSG_NXTHDR are defined for it.
+            #[allow(clippy::unnecessary_cast)]
+            // cmsg_len is size_t on Linux but socklen_t (u32) elsewhere
+            let (level, ty, data_ptr, data_len) = unsafe {
+                let cmsg = &*self.current;
+                let data_ptr = libc::CMSG_DATA(self.current as *mut _);
+                let header_len = (data_ptr as usize).saturating_sub(self.current as usize);
+                let total = cmsg.cmsg_len as usize;
+                // Defensive: if a malformed cmsg claims a length shorter
+                // than its own header, treat the data area as empty rather
+                // than wrap-around to a giant slice.
+                let data_len = total.saturating_sub(header_len);
+                let level = cmsg.cmsg_level;
+                let ty = cmsg.cmsg_type;
+                self.current = libc::CMSG_NXTHDR(&self.msg, self.current);
+                (level, ty, data_ptr, data_len)
+            };
+
+            if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
+                // SAFETY: data_ptr/data_len are bound by the cmsg header
+                // values which the kernel produced. The lifetime ties back
+                // to the buffer borrowed by Messages<'a>.
+                let data: &'a [u8] = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+                return Some(AncillaryData::ScmRights(ScmRights::new(data)));
+            }
+            // Unknown cmsg type — skip and continue walking.
         }
     }
 }
 
-/// Buffer for building and parsing Unix socket ancillary data (control messages).
+/// Buffer for building and parsing Unix socket ancillary data (control
+/// messages).
 ///
 /// Used with `sendmsg`/`recvmsg` to pass file descriptors via `SCM_RIGHTS`.
 pub struct SocketAncillary<'a> {
@@ -122,32 +149,32 @@ impl<'a> SocketAncillary<'a> {
         }
     }
 
-    /// Returns the minimum buffer size needed to send `num_fds` file descriptors.
+    /// Minimum buffer size needed to send `num_fds` file descriptors.
     pub fn buffer_size_for_rights(num_fds: usize) -> usize {
+        // SAFETY: CMSG_SPACE is a pure inline calculation.
         unsafe { libc::CMSG_SPACE((num_fds * mem::size_of::<RawFd>()) as libc::c_uint) as usize }
     }
 
-    /// Add file descriptors to be sent via `SCM_RIGHTS`.
+    /// Append file descriptors as an `SCM_RIGHTS` cmsg.
     ///
-    /// Uses `BorrowedFd` to ensure the caller retains ownership of the FDs.
+    /// `BorrowedFd` ensures the caller retains ownership of the fds.
     pub fn add_fds(&mut self, fds: &[BorrowedFd<'_>]) -> Result<(), AncillaryError> {
-        // Convert BorrowedFd slice to raw fd slice for the kernel
-        let raw_fds: Vec<RawFd> = fds.iter().map(|fd| {
-            use std::os::unix::io::AsRawFd;
-            fd.as_raw_fd()
-        }).collect();
-
-        let fd_bytes_len = raw_fds.len() * mem::size_of::<RawFd>();
+        let fd_bytes_len = fds.len() * mem::size_of::<RawFd>();
+        // SAFETY: pure inline calculation.
         let space = unsafe { libc::CMSG_SPACE(fd_bytes_len as libc::c_uint) as usize };
 
-        if self.length + space > self.buffer.len() {
+        let new_len = self.length.checked_add(space).ok_or(AncillaryError)?;
+        if new_len > self.buffer.len() {
             return Err(AncillaryError);
         }
 
+        // SAFETY: we walk the buffer with cmsg(3) macros and write a single
+        // cmsghdr + fd payload at the correct offset. The buffer is
+        // exclusively borrowed and large enough for `new_len` bytes.
         unsafe {
             let mut msg: libc::msghdr = mem::zeroed();
             msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
-            msg.msg_controllen = (self.length + space) as _;
+            msg.msg_controllen = new_len as _;
 
             let cmsg = if self.length == 0 {
                 libc::CMSG_FIRSTHDR(&msg)
@@ -164,7 +191,6 @@ impl<'a> SocketAncillary<'a> {
                     }
                     cur = next;
                 }
-                msg.msg_controllen = (self.length + space) as _;
                 if cur.is_null() {
                     libc::CMSG_FIRSTHDR(&msg)
                 } else {
@@ -180,24 +206,32 @@ impl<'a> SocketAncillary<'a> {
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
             (*cmsg).cmsg_len = libc::CMSG_LEN(fd_bytes_len as libc::c_uint) as _;
 
-            let data_ptr = libc::CMSG_DATA(cmsg);
-            std::ptr::copy_nonoverlapping(
-                raw_fds.as_ptr() as *const u8,
-                data_ptr,
-                fd_bytes_len,
-            );
+            // Write fds straight into the cmsg data area. `write_unaligned`
+            // because `CMSG_DATA` is not guaranteed to be `RawFd`-aligned.
+            let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
+            for (i, fd) in fds.iter().enumerate() {
+                std::ptr::write_unaligned(data_ptr.add(i), fd.as_raw_fd());
+            }
         }
 
-        self.length += space;
+        self.length = new_len;
         Ok(())
     }
 
-    /// Iterate over received ancillary data messages.
+    /// Iterate received ancillary data messages.
+    ///
+    /// Iterate exactly once; see [`ScmRights`].
     pub fn messages(&self) -> Messages<'_> {
         Messages::new(&self.buffer[..self.length], self.length)
     }
 
     /// Returns `true` if the ancillary data was truncated during receive.
+    ///
+    /// On platforms with `MSG_CMSG_CLOEXEC` (Linux/*BSD), truncation means
+    /// extra fds were discarded by the kernel and never entered our process.
+    /// On macOS, the kernel may have deposited fds beyond the buffer that
+    /// this crate cannot reach — **always size the buffer for the maximum
+    /// expected fd count on macOS**.
     #[must_use]
     pub fn is_truncated(&self) -> bool {
         self.truncated
@@ -208,52 +242,4 @@ impl<'a> SocketAncillary<'a> {
         self.length = 0;
         self.truncated = false;
     }
-}
-
-/// On drop, if the ancillary data was truncated, attempt to close any FDs
-/// that the kernel may have added to our process but didn't deliver in the buffer.
-///
-/// This is primarily needed on macOS where the kernel adds FDs to the process
-/// FD table even when the ancillary buffer is too small to hold them.
-impl Drop for SocketAncillary<'_> {
-    fn drop(&mut self) {
-        // On macOS, if MSG_CTRUNC is set, the kernel may have leaked FDs into our
-        // process. Consume all visible FDs so they get closed via OwnedFd::drop.
-        #[cfg(target_os = "macos")]
-        if self.truncated {
-            for msg in self.messages() {
-                match msg {
-                    AncillaryData::ScmRights(rights) => {
-                        for _fd in rights {
-                            // OwnedFd dropped here, closing the fd
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Platform-specific: set CLOEXEC on an fd via fcntl.
-/// Used on platforms without MSG_CMSG_CLOEXEC (macOS).
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "netbsd",
-    target_os = "openbsd",
-)))]
-pub(crate) fn set_cloexec(fd: RawFd) -> io::Result<()> {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let ret = libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
