@@ -14,6 +14,29 @@ Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS file descriptor passing) 
 - **CLOEXEC errors surfaced** — if `fcntl(FD_CLOEXEC)` fails on macOS, every received fd is closed and the error is returned
 - **Fuzz-hardened parser** — bounds-checked `cmsg_len` walk and defensive fd validation; tens of millions of fuzz executions clean
 - **Ergonomic extension traits** — `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
+- **Async support** — the same API on tokio sockets behind an optional `tokio` feature (off by default)
+
+## Why this crate
+
+Passing fds over Unix sockets is well-trodden ground. The distinction here is
+that received descriptors are **owned and close-on-exec by default** — you
+can't forget to close one, and they don't silently leak into child processes.
+
+| | `unix-ancillary` | `sendfd` | `nix` / raw `libc` |
+|---|:---:|:---:|:---:|
+| Received fd type | **`OwnedFd`** | `RawFd` | `RawFd` |
+| Auto-close on drop | **yes** | no (caller owns) | no |
+| `FD_CLOEXEC` on received fds | **yes** (kernel or `fcntl`) | **no** | manual |
+| Surplus fds on over-send | **wrapped + closed** | silently dropped | manual |
+| Fuzz-hardened cmsg parser | **yes** | — | — |
+| Blocking API | yes | yes | yes |
+| Async (tokio) | **yes** (`tokio` feature) | yes | manual |
+| Stable Rust | yes | yes | yes |
+
+`sendfd` hands you `RawFd` integers with no `MSG_CMSG_CLOEXEC` — you own the
+lifetimes and the received fds are inheritable across `exec` unless you set the
+flag yourself. std's `SocketAncillary` is `OwnedFd`-based but nightly-only.
+This crate is the stable, safe-by-default middle.
 
 ## Quick Start
 
@@ -43,6 +66,31 @@ use unix_ancillary::UnixStreamExt;
 let (_tx, rx) = UnixStream::pair().unwrap();
 let mut buf = [0u8; 256];
 let (n, fds) = rx.recv_fds_into::<4>(&mut buf).unwrap();
+```
+
+## Async (tokio)
+
+Enable the `tokio` feature — blocking users pull in no extra dependencies:
+
+```toml
+[dependencies]
+unix-ancillary = { version = "0.2", features = ["tokio"] }
+```
+
+The async API mirrors the blocking one on `tokio::net::UnixStream` /
+`UnixDatagram`, with identical leak-proof and CLOEXEC semantics:
+
+```rust,ignore
+use tokio::net::UnixStream;
+use unix_ancillary::AsyncUnixStreamExt;
+
+let (tx, rx) = UnixStream::pair()?;
+
+let file = std::fs::File::open("/dev/null")?;
+tx.send_fds(b"hello", &[&file]).await?;
+
+let recv = rx.recv_fds::<1>().await?;
+assert_eq!(recv.fds.len(), 1);
 ```
 
 ## Low-Level API

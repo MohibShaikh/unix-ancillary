@@ -5,56 +5,33 @@
 //! `recvmsg` (Linux, Android, FreeBSD, DragonFly, NetBSD, OpenBSD) and
 //! everything else (notably macOS), where we must `fcntl(F_SETFD, FD_CLOEXEC)`
 //! after the syscall.
+//!
+//! The macOS fallback ([`fallback`]) is written against plain `fcntl`/
+//! `getrlimit`, which behave identically on Linux — nothing in it is
+//! Darwin-specific, it is merely *selected out* on kernels that offer
+//! `MSG_CMSG_CLOEXEC`. It is compiled on every platform so its logic can be
+//! unit-tested anywhere (see the tests at the bottom of this file), even
+//! though only non-`MSG_CMSG_CLOEXEC` targets wire it into the recv path.
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "netbsd",
-    target_os = "openbsd",
-))]
-mod inner {
-    use std::io;
-
-    /// Flags passed to `recvmsg`. On supported platforms we ask the kernel to
-    /// set `FD_CLOEXEC` atomically.
-    pub(crate) const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
-
-    /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
-    #[inline]
-    pub(crate) fn cloexec_received(_buf: &[u8]) -> io::Result<()> {
-        Ok(())
-    }
-
-    /// Maximum number of fds the kernel can possibly deliver in one
-    /// `SCM_RIGHTS` message. Linux hard-codes `SCM_MAX_FD = 253` and other
-    /// `MSG_CMSG_CLOEXEC`-supporting BSDs enforce comparable per-message
-    /// caps. Sizing the receive cmsg buffer to this value makes truncation
-    /// impossible.
-    #[inline]
-    pub(crate) fn max_recv_fds() -> usize {
-        253
-    }
-}
-
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "netbsd",
-    target_os = "openbsd",
-)))]
-mod inner {
+/// The macOS / no-`MSG_CMSG_CLOEXEC` fallback, compiled on all platforms so it
+/// stays testable on Linux CI. Only `mod inner` on those targets calls it; on
+/// `MSG_CMSG_CLOEXEC` platforms it is reached solely from the unit tests, so
+/// suppress dead-code warnings there.
+#[cfg_attr(
+    any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ),
+    allow(dead_code)
+)]
+pub(crate) mod fallback {
     use std::io;
     use std::mem;
     use std::os::unix::io::RawFd;
-
-    /// Flags passed to `recvmsg`. macOS et al. don't support
-    /// `MSG_CMSG_CLOEXEC`; we set it via `fcntl` post-recv, accepting the
-    /// brief inherit-across-exec race.
-    pub(crate) const RECV_FLAGS: libc::c_int = 0;
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {
         // SAFETY: F_GETFD/F_SETFD on a kernel-supplied fd is always defined;
@@ -74,7 +51,7 @@ mod inner {
 
     /// Walk the kernel-formatted ancillary buffer and emit each `SCM_RIGHTS`
     /// fd as a raw value, without taking ownership.
-    fn raw_fds_in_buffer(buf: &[u8]) -> Vec<RawFd> {
+    pub(crate) fn raw_fds_in_buffer(buf: &[u8]) -> Vec<RawFd> {
         let mut out = Vec::new();
         if buf.is_empty() {
             return out;
@@ -138,21 +115,30 @@ mod inner {
     /// `RLIM_INFINITY` values. 1M fds × 4 bytes ≈ 4 MiB cmsg buffer — far
     /// above any realistic `RLIMIT_NOFILE` and well within reason for a
     /// single recv call.
-    const HARD_CEILING: usize = 1 << 20;
+    pub(crate) const HARD_CEILING: usize = 1 << 20;
 
     /// Floor — never go below the Linux-style 253 cap so behaviour stays
     /// consistent across platforms when `getrlimit` returns nonsense.
-    const HARD_FLOOR: usize = 253;
+    pub(crate) const HARD_FLOOR: usize = 253;
+
+    /// Clamp a raw `RLIMIT_NOFILE` current value into `[HARD_FLOOR,
+    /// HARD_CEILING]`, mapping `RLIM_INFINITY` and any unrepresentable value
+    /// to the ceiling. Pure — the buffer-sizing policy, split out so it is
+    /// testable without a live `getrlimit`.
+    pub(crate) fn clamp_nofile(cur: libc::rlim_t) -> usize {
+        let n: usize = if cur == libc::RLIM_INFINITY {
+            HARD_CEILING
+        } else {
+            usize::try_from(cur).unwrap_or(HARD_CEILING)
+        };
+        n.clamp(HARD_FLOOR, HARD_CEILING)
+    }
 
     /// Maximum number of fds the kernel can deliver in one `SCM_RIGHTS`
-    /// message on this platform.
-    ///
-    /// On macOS the kernel does not enforce a fixed per-message fd cap;
-    /// instead it is bounded by the receiver's `RLIMIT_NOFILE` (the kernel
-    /// must allocate fd table entries for every delivered fd, and cannot
-    /// exceed that limit). We therefore size the receive cmsg buffer to
-    /// `RLIMIT_NOFILE` so truncation — and the resulting fd leak — is
-    /// kernel-impossible.
+    /// message, bounded by the receiver's `RLIMIT_NOFILE` (the kernel must
+    /// allocate an fd table entry per delivered fd and cannot exceed that
+    /// limit). Sizing the receive cmsg buffer to this makes truncation — and
+    /// the resulting fd leak — kernel-impossible.
     pub(crate) fn max_recv_fds() -> usize {
         // SAFETY: getrlimit with a writable rlimit out-pointer is always
         // defined; we treat any failure as "fall back to a safe default".
@@ -161,14 +147,135 @@ mod inner {
         if rc < 0 {
             return HARD_CEILING;
         }
-        let cur = rlim.rlim_cur;
-        let n: usize = if cur == libc::RLIM_INFINITY {
-            HARD_CEILING
-        } else {
-            usize::try_from(cur).unwrap_or(HARD_CEILING)
-        };
-        n.clamp(HARD_FLOOR, HARD_CEILING)
+        clamp_nofile(rlim.rlim_cur)
     }
 }
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+))]
+mod inner {
+    use std::io;
+
+    /// Flags passed to `recvmsg`. On supported platforms we ask the kernel to
+    /// set `FD_CLOEXEC` atomically.
+    pub(crate) const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+
+    /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
+    #[inline]
+    pub(crate) fn cloexec_received(_buf: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Maximum number of fds the kernel can possibly deliver in one
+    /// `SCM_RIGHTS` message. Linux hard-codes `SCM_MAX_FD = 253` and other
+    /// `MSG_CMSG_CLOEXEC`-supporting BSDs enforce comparable per-message
+    /// caps. Sizing the receive cmsg buffer to this value makes truncation
+    /// impossible.
+    #[inline]
+    pub(crate) fn max_recv_fds() -> usize {
+        253
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+)))]
+mod inner {
+    /// Flags passed to `recvmsg`. macOS et al. don't support
+    /// `MSG_CMSG_CLOEXEC`; we set it via `fcntl` post-recv, accepting the
+    /// brief inherit-across-exec race.
+    pub(crate) const RECV_FLAGS: libc::c_int = 0;
+
+    pub(crate) use super::fallback::{cloexec_received, max_recv_fds};
+}
+
 pub(crate) use inner::*;
+
+#[cfg(test)]
+mod tests {
+    use super::fallback;
+    use std::os::unix::io::AsRawFd;
+
+    #[test]
+    fn clamp_nofile_maps_special_and_out_of_range_values() {
+        assert_eq!(fallback::clamp_nofile(0), fallback::HARD_FLOOR);
+        assert_eq!(fallback::clamp_nofile(10), fallback::HARD_FLOOR);
+        assert_eq!(fallback::clamp_nofile(1024), 1024);
+        assert_eq!(
+            fallback::clamp_nofile(libc::RLIM_INFINITY),
+            fallback::HARD_CEILING,
+        );
+        assert_eq!(
+            fallback::clamp_nofile(u64::MAX as libc::rlim_t),
+            fallback::HARD_CEILING,
+        );
+    }
+
+    /// Exercise the exact macOS post-recv path on Linux: receive an fd with
+    /// `MSG_CMSG_CLOEXEC` suppressed (so it arrives WITHOUT close-on-exec),
+    /// then run the fcntl fallback and confirm `FD_CLOEXEC` is now set.
+    #[test]
+    fn cloexec_received_sets_flag_via_fcntl() {
+        use crate::ancillary::SocketAncillary;
+        use crate::cmsg;
+        use std::io::{IoSlice, IoSliceMut};
+        use std::os::unix::io::AsFd;
+        use std::os::unix::net::UnixStream;
+
+        let (tx, rx) = UnixStream::pair().unwrap();
+        let file = tempfile::tempfile().unwrap();
+
+        let mut sbuf = vec![0u8; SocketAncillary::buffer_size_for_rights(1)];
+        let mut anc = SocketAncillary::new(&mut sbuf);
+        anc.add_fds(&[file.as_fd()]).unwrap();
+        let iov = [IoSlice::new(b"x")];
+        cmsg::sendmsg_vectored(tx.as_fd(), &iov, anc.buffer, anc.length).unwrap();
+
+        // Raw recvmsg with flags = 0 (NOT MSG_CMSG_CLOEXEC) so the delivered
+        // fd is inheritable — the state a macOS kernel always hands back.
+        let mut data = [0u8; 8];
+        let mut anc_buf = vec![0u8; SocketAncillary::buffer_size_for_rights(1)];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        let mut riov = [IoSliceMut::new(&mut data)];
+        msg.msg_iov = riov.as_mut_ptr() as *mut libc::iovec;
+        msg.msg_iovlen = riov.len() as _;
+        msg.msg_control = anc_buf.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = anc_buf.len() as _;
+        let ret = unsafe { libc::recvmsg(rx.as_fd().as_raw_fd(), &mut msg, 0) };
+        assert!(ret >= 0);
+        let anc_len = msg.msg_controllen as usize;
+
+        let raw = fallback::raw_fds_in_buffer(&anc_buf[..anc_len]);
+        assert_eq!(raw.len(), 1);
+        let fd = raw[0];
+
+        // Before the fallback runs, the fd is inheritable.
+        let before = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(before & libc::FD_CLOEXEC, 0, "arrived with CLOEXEC unset");
+
+        fallback::cloexec_received(&anc_buf[..anc_len]).unwrap();
+
+        let after = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(
+            after & libc::FD_CLOEXEC,
+            libc::FD_CLOEXEC,
+            "fallback must set FD_CLOEXEC"
+        );
+
+        // Take ownership of the received (duplicate) fd so it closes on drop;
+        // `file` drops normally at end of scope.
+        use std::os::unix::io::{FromRawFd, OwnedFd};
+        let _owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+}

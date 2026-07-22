@@ -67,12 +67,17 @@
 compile_error!("unix-ancillary only supports Unix platforms");
 
 mod ancillary;
+#[cfg(feature = "tokio")]
+mod asyncio;
 mod cmsg;
 mod ext;
 mod platform;
 
 pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
 pub use ext::{ReceivedFds, UnixDatagramExt, UnixStreamExt};
+
+#[cfg(feature = "tokio")]
+pub use asyncio::{AsyncUnixDatagramExt, AsyncUnixStreamExt};
 
 #[doc(hidden)]
 pub use ancillary::__fuzz_parse;

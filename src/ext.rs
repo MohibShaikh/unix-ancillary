@@ -6,8 +6,8 @@ use crate::ancillary::{AncillaryData, SocketAncillary};
 use crate::cmsg;
 use crate::platform;
 
-const DEFAULT_STREAM_BUF: usize = 4096;
-const DEFAULT_DATAGRAM_BUF: usize = 65536;
+pub(crate) const DEFAULT_STREAM_BUF: usize = 4096;
+pub(crate) const DEFAULT_DATAGRAM_BUF: usize = 65536;
 
 /// Result of a successful `recv_fds` call.
 ///
@@ -25,7 +25,11 @@ pub struct ReceivedFds {
     pub fds: Vec<OwnedFd>,
 }
 
-fn send_fds_impl(fd: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) -> io::Result<usize> {
+pub(crate) fn send_fds_impl(
+    fd: BorrowedFd<'_>,
+    data: &[u8],
+    fds: &[BorrowedFd<'_>],
+) -> io::Result<usize> {
     let mut buf = vec![0u8; SocketAncillary::buffer_size_for_rights(fds.len())];
     let mut ancillary = SocketAncillary::new(&mut buf);
     ancillary
@@ -50,7 +54,7 @@ fn send_fds_impl(fd: BorrowedFd<'_>, data: &[u8], fds: &[BorrowedFd<'_>]) -> io:
 /// wrapped in `OwnedFd` and dropped before returning, closing them. If the
 /// kernel still reports `MSG_CTRUNC` (defensive — should be unreachable),
 /// every fd we extracted is closed and an error is returned.
-fn recv_fds_into_impl<const N: usize>(
+pub(crate) fn recv_fds_into_impl<const N: usize>(
     fd: BorrowedFd<'_>,
     data_buf: &mut [u8],
 ) -> io::Result<(usize, Vec<OwnedFd>)> {

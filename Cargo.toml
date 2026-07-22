@@ -1,6 +1,6 @@
 [package]
 name = "unix-ancillary"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS fd passing) with OwnedFd/BorrowedFd"
@@ -12,6 +12,20 @@ exclude = ["/fuzz", "/target", "/.github"]
 
 [dependencies]
 libc = "0.2"
+tokio = { version = "1", optional = true, default-features = false, features = ["net"] }
+
+[features]
+# Async fd passing on tokio's UnixStream/UnixDatagram. Off by default —
+# blocking users pull in no extra dependencies.
+tokio = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["net", "rt", "macros"] }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[[example]]
+name = "async_pass_fd"
+required-features = ["tokio"]

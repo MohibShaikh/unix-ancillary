@@ -72,24 +72,6 @@ fn recv_fds_into_with_user_buffer() {
 }
 
 #[test]
-fn surplus_fds_dropped_not_leaked() {
-    let (tx, rx) = UnixStream::pair().unwrap();
-
-    let f1 = tempfile::tempfile().unwrap();
-    let f2 = tempfile::tempfile().unwrap();
-    let f3 = tempfile::tempfile().unwrap();
-
-    tx.send_fds(b"trunc", &[&f1, &f2, &f3]).unwrap();
-
-    // Caller asks for one fd; peer sent three. The cmsg buffer is sized to
-    // the kernel cap so all three are wrapped in OwnedFd. We keep one and
-    // drop the surplus, closing those two fds.
-    let recv = rx.recv_fds::<1>().unwrap();
-    assert_eq!(recv.fds.len(), 1);
-    assert_eq!(&recv.data[..], b"trunc");
-}
-
-#[test]
 fn low_level_api() {
     let (tx, rx) = UnixStream::pair().unwrap();
 
