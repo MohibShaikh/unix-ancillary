@@ -16,6 +16,29 @@ Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS file descriptor passing) 
 - **Ergonomic extension traits** — `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
 - **Async support** — the same API on tokio sockets behind an optional `tokio` feature (off by default)
 
+## When to reach for this
+
+Use `unix-ancillary` when you're passing an open file descriptor between
+processes over a Unix socket and you don't want to babysit its lifetime or
+worry about it leaking. Common cases:
+
+- **Privilege separation** — a privileged process binds a socket or opens a
+  protected file and hands the descriptor to an unprivileged worker, so the
+  worker never needs the privilege itself. (See `examples/privsep.rs`.)
+- **Sandboxing / capability passing** — a supervisor opens exactly what a
+  sandboxed task may touch and passes those fds in; the sandbox gets no
+  `open()` rights of its own. A natural fit for confining agent/tool
+  execution. (See `examples/agent_sandbox.rs`.)
+- **Socket activation & graceful restart** — hand a live listening socket to a
+  freshly-exec'd process without dropping connections.
+- **Connection handoff** — a front-end accepts a connection and passes the
+  accepted socket to a backend worker pool.
+
+Received descriptors come back as `OwnedFd` (closed on drop) with
+`FD_CLOEXEC` already set, so they can't outlive their scope or leak into a
+child across `exec`. Works on blocking sockets out of the box, and on tokio
+sockets with the `tokio` feature.
+
 ## Why this crate
 
 Passing fds over Unix sockets is well-trodden ground. The distinction here is
