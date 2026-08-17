@@ -97,6 +97,27 @@ assert_eq!(recv.fds.len(), 1);
 > association matters. Sending one or more descriptors over a stream requires
 > at least one payload byte.
 
+## What the tests verify
+
+![Terminal demo of the test suite](https://raw.githubusercontent.com/MohibShaikh/unix-ancillary/main/docs/demo.gif)
+
+The suite in action. Three moments worth knowing:
+
+1. **The whole default suite is green** — 17 tests, including descriptor
+   leak checks and the datagram truncation path.
+2. **`send_to_closed_peer_returns_error_without_sigpipe`** — a write to a
+   closed peer returns `BrokenPipe` instead of terminating the process with
+   `SIGPIPE`. This one used to pass without testing anything: Rust's runtime
+   sets `SIGPIPE` to `SIG_IGN` at startup, so the regression only proves
+   anything once the test resets it to `SIG_DFL`.
+3. **`partial_first_send_delivers_exactly_one_descriptor`** — the
+   descriptor-once guarantee under a genuinely short first `sendmsg`:
+   `descriptors_seen=1` while the completion loop drains the rest of the
+   payload. With the default socket buffer the first send accepts all
+   131072 bytes and the loop never runs; shrinking `SO_SNDBUF` to 2048 makes
+   it accept only 4480, so the loop has to finish the job — and still only
+   one descriptor arrives.
+
 ## Bring-your-own buffer
 
 ```rust
