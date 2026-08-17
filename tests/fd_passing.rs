@@ -146,8 +146,16 @@ fn send_to_closed_peer_returns_error_without_sigpipe() {
         let (tx, rx) = UnixStream::pair().unwrap();
         drop(rx);
         let file = tempfile::tempfile().unwrap();
-        let err = tx.send_fds(b"x", &[&file]).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        let result = tx.send_fds(b"x", &[&file]);
+        // Recorded so CI shows what each kernel actually returns. Linux gives
+        // BrokenPipe; the assertion stays on "an error, and we are still
+        // alive" because the errno is not the property under test — the
+        // parent's exit-status check is.
+        eprintln!("send to closed peer returned: {result:?}");
+        assert!(
+            result.is_err(),
+            "send to a closed peer should fail, got {result:?}"
+        );
         return;
     }
 
