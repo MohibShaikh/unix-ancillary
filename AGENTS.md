@@ -21,19 +21,20 @@ Never mark work complete here without recording the exact verification command a
 ## Repository state
 
 - Repository: `/home/noman/personal-projects/unix-ancillary`
-- Branch: `feat/production-capability-channel`
-- Base branch: `main`
+- Branch: `feat/phase2-core-hardening`
+- Base branch: `main`; the planning commit `1d75576` is the branch base
 - Baseline commit: `71b2e5e6318168ec9060e3f2cbb2be011e281dfd`
-- Published crate: `unix-ancillary 0.3.0`
+- Published crate: `unix-ancillary 0.3.0` (working tree is `0.4.0`, unreleased)
 - Rust edition: 2021
 - Declared MSRV: Rust 1.75
 - Durable initiative: `build-unix-ancillary-into-a-production-capability-channel`
-- Current phase: Phase 2, core correctness hardening Task 2
+- Current phase: Phase 2 complete (core correctness hardening); crate ends at Layer 2
 - Phase 2 Task 1 completed on 2026-08-17 on branch `feat/phase2-core-hardening` (a new branch carrying the reviewed plan edits; the planning commit `1d75576` is its base). Red state observed first: both new tests failed with `unwrap_err()` on `Ok(0)`; after `validate_stream_send` in `src/ext.rs` and calls in `UnixStreamExt::send_fds` and `AsyncUnixStreamExt::send_fds`, `cargo test --test fd_passing` (9 tests) and `cargo test --all-features --test async_fd` (4 tests) pass in Docker on Rust 1.97.1.
 - Phase 2 Task 2 completed on 2026-08-17. The SIGPIPE subprocess regression test went red first with `child terminated with signal: 13 (SIGPIPE)`. Added `SEND_FLAGS` (`MSG_NOSIGNAL` for the CLOEXEC six, `SO_NOSIGPIPE` via `prepare_send` on Apple, documented `0` fallback for unknown Unix) in `src/platform.rs` and EINTR retry loops in both `sendmsg_vectored` and `recvmsg_vectored` in `src/cmsg.rs`. The regression test, full default suite (10 fd_passing tests), all-feature suite, clippy `-D warnings`, and fmt all pass in Docker on Rust 1.97.1.
 - Phase 2 Task 3 completed on 2026-08-17. Added `send_fds_all` to `UnixStreamExt` and `AsyncUnixStreamExt`. Tests went red first on compile (`no method named send_fds_all`). Added `cmsg::send_bytes` and used it (not `Write::write_all`) for the tail so `MSG_NOSIGNAL` covers the whole payload. tokio dev-deps gained `io-util` for `AsyncReadExt` in the round-trip test. Blocking and Tokio round-trip tests pass (payload 128 KiB + one descriptor, exactly one descriptor delivered), full default and all-feature suites pass, clippy and fmt clean in Docker on Rust 1.97.1.
 - Phase 2 Task 4 completed on 2026-08-17. Both datagram truncation tests went red first (`unwrap_err()` on `Ok(..)`). Split `RecvMsgResult.truncated` into `ancillary_truncated` + `data_truncated`; `RecvResult` is now `#[non_exhaustive]` with `data_truncated` (a deliberate source break: version bumped to 0.4.0 and `CHANGELOG.md` created in this task, not deferred); `ReceivedFds` gained `data_truncated`. `recv_fds_into_impl` takes `SocketKind` and datagram calls drop all received fds then return `InvalidData` on payload truncation, leaving `cmsg_recvmsg` as the only lenient path. The spec's "lower-level methods may return the flag" line was already corrected by the reviewed plan edits. Full default (12 fd_passing tests) and all-feature suites, clippy, and fmt pass in Docker on Rust 1.97.1.
 - Phase 2 Task 5 completed on 2026-08-17. Added `recv_fds_exact`/`recv_fds_exact_into` to `UnixStreamExt`, `UnixDatagramExt`, `AsyncUnixStreamExt`, and `AsyncUnixDatagramExt`. Tests went red first on compile (`no method named recv_fds_exact`). Introduced internal `CountMode::{UpTo,Exact}`; `recv_fds_into_impl` now takes `SocketKind` + `CountMode` and drops every received descriptor before returning `InvalidData` on an exact-count mismatch. The two fd-counting leak tests in `tests/fd_leak.rs` raced the process-global fd table under default test concurrency, so they serialize through a shared `Mutex` (`FD_LOCK`). Blocking (4), Tokio (4), and leak (2) tests pass, full default (16 fd_passing tests) and all-feature suites pass, clippy and fmt clean in Docker on Rust 1.97.1.
+- Phase 2 Task 6 completed on 2026-08-17. README gained a "Choosing a send / receive method" guide and crate docs mirror it; CI gained the SIGPIPE and fd_leak edge-test steps plus `cargo test` in the msrv job; `CHANGELOG.md` documents the 0.4.0 source breaks. Canonical Docker acceptance on Rust 1.97.1 passes in full (build, default + all-feature tests, rustdoc, clippy `-D warnings`, fmt, all four examples). MSRV verified on `rust:1.75` (`cargo build --all-targets` + `cargo test`) after pinning `tempfile` to 3.14.0 in `Cargo.lock` — 3.26 pulls `getrandom 0.4.1`, which requires the edition2024 Cargo feature unavailable in 1.75.
 - Baseline Docker status: complete on Rust 1.97.1; build, tests, doctests, rustdoc, Clippy, fmt, and all four public examples pass
 - Last updated: 2026-08-17 UTC
 
@@ -181,42 +182,45 @@ Do not create these files blindly. Follow the committed implementation plan and 
 - [x] Phase 2 Task 3: descriptor-once complete stream sends (`feat: add descriptor-once complete stream sends`).
 - [x] Phase 2 Task 4: surface datagram payload truncation (`fix: report Unix datagram payload truncation`).
 - [x] Phase 2 Task 5: exact descriptor-count receive APIs (`feat: add strict descriptor-count receive APIs`).
-- [ ] Phase 2 Task 6: finish core hardening documentation and verification.
+- [x] Phase 2 Task 6: finish core hardening documentation and verification (`docs: complete core hardening guidance and verification`).
+- [x] Phase 2 complete on 2026-08-17. Canonical Docker acceptance on Rust 1.97.1 passes (build, default + all-feature tests, rustdoc, clippy `-D warnings`, fmt, four examples). MSRV verified on `rust:1.75` with `cargo build --all-targets` and `cargo test` after pinning `tempfile` to 3.14.0 in `Cargo.lock` (3.26 pulls `getrandom 0.4.1`, which requires the edition2024 Cargo feature). Per the user's decision, the crate ends at Layer 2: peer credentials stay as the one absorbed duplication, Phase 4's exit remains one real dependent or a documented stop, and `FdChannel` stays gated on a named request. Do not start Phase 3+ without a new directive.
 
 ## Known correctness gaps to address
 
-1. Unix stream reads do not preserve `send_fds` boundaries, but current docs do not emphasize this sufficiently.
-2. Linux stream `SCM_RIGHTS` requires at least one normal byte; empty payload behavior is not enforced.
-3. A partial `sendmsg` transfers descriptors once but may leave payload bytes unsent.
-4. `sendmsg` currently uses flag `0`, leaving a potential `SIGPIPE` process-termination path.
-5. Datagram payload truncation is not surfaced independently from ancillary truncation.
-6. Surplus descriptor closing is safe but can hide protocol count mismatches.
+Addressed by Phase 2 on 2026-08-17:
+
+1. ~~Unix stream reads do not preserve `send_fds` boundaries~~ — documented on both stream traits, crate docs, and README; framed protocols recommended.
+2. ~~Linux stream `SCM_RIGHTS` requires at least one normal byte~~ — `send_fds`/`send_fds_all` reject empty payloads with fds via `InvalidInput`.
+3. ~~Partial `sendmsg` transfers descriptors once but may leave payload bytes unsent~~ — `send_fds_all` completes the payload descriptor-once with signal-safe sends.
+4. ~~`sendmsg` uses flag `0`, leaving a `SIGPIPE` path~~ — `MSG_NOSIGNAL` / `SO_NOSIGPIPE`; unknown Unix targets documented.
+5. ~~Datagram payload truncation not surfaced independently~~ — `RecvResult::data_truncated`; convenience methods reject it with `InvalidData`.
+6. ~~Surplus descriptor closing hides count mismatches~~ — `recv_fds_exact`/`recv_fds_exact_into` error on mismatch while still closing surplus fds.
+
+Remaining:
+
 7. High-level calls allocate descriptor and ancillary storage per operation. Accepted, not a gap: `rustix` owns the reusable-buffer story.
-8. Peer credentials and BSD execution coverage are missing. Unconnected datagram addressing is delegated to `uds`.
+8. Peer credentials and BSD execution coverage are missing. Unconnected datagram addressing is delegated to `uds`. Peer credentials stay the one absorbed duplication (Phase 3), gated on a new directive.
 
 ## Last session activity
 
-- Completed repository, competitor, adoption, and gap assessment.
-- Confirmed public metrics: 298 crates.io downloads, 246 recent downloads, 6 GitHub stars, and zero published reverse dependencies at assessment time.
-- Confirmed the standard-library ancillary API remains nightly-only.
-- Confirmed newer projects such as `capsudo-transport` still implement descriptor transport, framing, and peer credentials directly with `nix`, supporting the higher-level opportunity.
-- Created and switched to dedicated branch `feat/production-capability-channel` before implementation.
-- Created the durable initiative and milestone structure.
-- Pulled official `rust:latest` Docker image.
-- Corrected Docker acceptance passed all builds, default and all-feature tests, doctests, rustdoc, Clippy, fmt, and the four shipped public examples on Rust 1.97.1.
-- Committed the durable handoff, approved design, execution roadmap, and detailed Phase 2 plan as `1d75576` (`docs: plan production capability channel roadmap`).
-- The first Phase 2 Task 1 implementer dispatch on OpenAI `gpt-5.5` failed before editing because the provider usage limit was reached. Task state is intact in `AGENTS.md` and the SDD ledger. Retry uses an Anthropic worker.
-- Reviewed the Phase 2 plan against the source before implementation and corrected six items: the SIGPIPE regression test could not go red because Rust's runtime sets `SIGPIPE` to `SIG_IGN`; `send_fds_all` finished its payload with `write(2)` and bypassed the signal-safe helper added two steps earlier; its snippet did not compile; the `RecvResult` change is a source break needing a `0.4.0` bump and a changelog; strict datagram receives leave `cmsg_recvmsg` as the only lenient path; and `compile_error!` on unlisted Unix targets would newly break illumos, Solaris, and AIX.
-- Measured crates.io on 2026-08-17: `sendfd` 2,285,277 downloads per 90 days from 13 direct dependents, `uds` 1,359,468 from 10, `ipc-channel` 804,818 from 54, `fd-queue` 143 from 1, `unix-ancillary` 246 from 0. Downloads track dependents, not features. Roadmap narrowed and reordered accordingly.
-- First Docker acceptance attempt failed only because login-shell `PATH` omitted Rust binaries. No project test result was produced by that attempt.
+- Prior session (baseline): assessed repo/competitors/adoption (298 downloads, 246 recent, 6 stars, 0 reverse deps); confirmed stdlib ancillary is nightly-only; created durable initiative and `feat/production-capability-channel`; pulled `rust:latest`; baseline Docker acceptance passed; committed handoff, design, roadmap, and Phase 2 plan as `1d75576`; a gpt-5.5 dispatch hit its provider limit before editing; reviewed the Phase 2 plan against source and corrected six items (SIGPIPE `SIG_IGN`, `write(2)` tail, uncompilable snippet, `RecvResult` source break / 0.4.0 bump, `cmsg_recvmsg` as only lenient path, `compile_error!` breaking illumos/Solaris/AIX). Measured crates.io on 2026-08-17: `sendfd` 2,285,277 / 90d from 13 dependents, `uds` 1,359,468 from 10, `ipc-channel` 804,818 from 54, `fd-queue` 143 from 1, `unix-ancillary` 246 from 0; downloads track dependents, roadmap narrowed accordingly.
+- Completed Phase 2 (core correctness hardening) end to end on branch `feat/phase2-core-hardening` from planning commit `1d75576`, six tasks, one commit each, each starting red and verified in Docker on Rust 1.97.1:
+  - `adf2cc0` `fix: enforce Unix stream fd payload contract` — `validate_stream_send`; empty payloads with fds now reject with `InvalidInput`.
+  - `92889c4` `fix: make ancillary sends signal-safe and EINTR-resilient` — `MSG_NOSIGNAL` for the CLOEXEC six, `SO_NOSIGPIPE` via `prepare_send` on Apple, `0` fallback documented; EINTR retry loops in both `sendmsg_vectored` and `recvmsg_vectored`.
+  - `ba547be` `feat: add descriptor-once complete stream sends` — `send_fds_all` on blocking and async stream traits; `cmsg::send_bytes` so `MSG_NOSIGNAL` covers the whole payload.
+  - `70209ec` `fix: report Unix datagram payload truncation` — split `ancillary_truncated`/`data_truncated`; `RecvResult`/`ReceivedFds` source break (0.4.0 bump); `CHANGELOG.md` created.
+  - `de61c8a` `feat: add strict descriptor-count receive APIs` — `recv_fds_exact`/`recv_fds_exact_into` on all four traits; `CountMode::{UpTo,Exact}`; exact mismatch drops all received fds then returns `InvalidData`; leak tests serialize via `FD_LOCK`.
+  - Task 6 (README "Choosing a send / receive method" guide, CI edge-test steps + msrv `cargo test`, changelog) verified by canonical Docker acceptance: build --all-targets --all-features, `cargo test` (16 fd_passing), `cargo test --all-features` (10 async), rustdoc, clippy `-D warnings`, fmt check, and all four examples pass on Rust 1.97.1.
+- MSRV verified on `rust:1.75`: `cargo build --all-targets` and `cargo test` both pass after pinning `tempfile` to 3.14.0 in `Cargo.lock` (the previously locked 3.26 pulls `getrandom 0.4.1`, which requires the edition2024 Cargo feature that Cargo 1.75 lacks). The `--precise` downgrade also drops the wasip2/wit-parser transitive set.
+- Per the user's direction the crate ends at Layer 2. Peer credentials stay the one absorbed duplication (Phase 3), Phase 4's exit stays one real dependent or a documented stop, and `FdChannel` (Phase 5) stays gated on a named downstream request. Do not start Phase 3+ without a new directive.
 
 ## Exact resume instructions
 
 1. Read this file completely.
-2. Run `git status --short` and confirm the current branch is `feat/production-capability-channel` and no unrelated changes will be overwritten.
+2. Run `git status --short` and confirm the current branch is `feat/phase2-core-hardening` and no unrelated changes will be overwritten.
 3. Check the durable initiative `build-unix-ancillary-into-a-production-capability-channel`.
-4. Baseline acceptance is complete. Re-run the canonical Docker workflow after each implementation milestone.
-5. Read `docs/superpowers/specs/2026-08-17-production-capability-channel-design.md` and `docs/superpowers/plans/2026-08-17-core-correctness-hardening.md`.
-6. Continue at Phase 2 Task 1 using TDD. The planning commit is `1d75576`.
+4. Baseline and Phase 2 acceptance are complete. Re-run the canonical Docker workflow after each future milestone.
+5. Read `docs/superpowers/specs/2026-08-17-production-capability-channel-design.md`, `docs/superpowers/plans/2026-08-17-core-correctness-hardening.md`, and the roadmap.
+6. Phase 2 is complete. Do not start Phase 3+ without a new directive from the user.
 7. Use `superpowers:test-driven-development` for every feature or bug fix.
 8. Update this file after each test cycle and commit.

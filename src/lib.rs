@@ -68,6 +68,23 @@
 //! Use a framed protocol (or a datagram / seqpacket socket) when
 //! descriptor-to-message association matters. Sending one or more descriptors
 //! over a stream requires at least one payload byte.
+//!
+//! # Choosing a send / receive method
+//!
+//! - [`UnixStreamExt::send_fds`] is one `sendmsg` — a single atomic call,
+//!   not a message transaction. A partial accept leaves descriptors
+//!   delivered and bytes pending.
+//! - [`UnixStreamExt::send_fds_all`] sends descriptors exactly once, then
+//!   completes the remaining ordinary bytes with signal-safe sends.
+//! - [`UnixStreamExt::recv_fds`] is permissive: up to `N` descriptors, and
+//!   surplus descriptors are closed automatically.
+//! - [`UnixStreamExt::recv_fds_exact`] validates the descriptor count,
+//!   returning `InvalidData` unless the peer sent exactly `N`.
+//! - Datagram methods reject payload truncation with `InvalidData`; use
+//!   [`cmsg_recvmsg`] to inspect a truncated datagram via
+//!   [`RecvResult::data_truncated`].
+//! - Sends are `SIGPIPE`-safe (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`) and retry
+//!   internally on `EINTR`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
