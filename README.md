@@ -14,10 +14,6 @@ Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS file descriptor passing) 
 - **CLOEXEC errors surfaced** — if `fcntl(FD_CLOEXEC)` fails on macOS, every received fd is closed and the error is returned
 - **Fuzz-hardened parser** — bounds-checked `cmsg_len` walk and defensive fd validation; tens of millions of fuzz executions clean
 - **Ergonomic extension traits** — `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
-- **Complete sends** — `send_fds_all()` transfers descriptors once, then finishes the payload signal-safely
-- **Strict counts** — `recv_fds_exact()` errors on descriptor-count mismatch instead of silently closing surplus fds
-- **SIGPIPE-safe** — sends suppress `SIGPIPE` (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`), and `EINTR` retries internally
-- **Truncation surfaced** — datagram payload truncation is an explicit `InvalidData` error
 - **Async support** — the same API on tokio sockets behind an optional `tokio` feature (off by default)
 
 ## When to reach for this
@@ -84,12 +80,6 @@ assert_eq!(recv.fds.len(), 1);
 // recv.fds[0] is an OwnedFd — automatically closed on drop
 ```
 
-> **Stream semantics:** Unix streams do not preserve send-call boundaries. A
-> receive call may return bytes or descriptors from multiple sends, or only
-> part of one send. Use a framed protocol when descriptor-to-message
-> association matters. Sending one or more descriptors over a stream requires
-> at least one payload byte.
-
 ## Bring-your-own buffer
 
 ```rust
@@ -101,36 +91,13 @@ let mut buf = [0u8; 256];
 let (n, fds) = rx.recv_fds_into::<4>(&mut buf).unwrap();
 ```
 
-## Choosing a send / receive method
-
-- **`send_fds`** is one `sendmsg` — a single atomic call, not a message
-  transaction. It returns the number of payload bytes accepted. On a stream,
-  a partial accept leaves descriptors delivered and bytes pending.
-- **`send_fds_all`** sends descriptors exactly once, then completes the
-  remaining ordinary bytes with signal-safe sends. Use it when the whole
-  payload must go out and you cannot retry descriptor delivery safely.
-- **`recv_fds`** is permissive: it returns up to `N` descriptors and silently
-  closes any surplus. Use it when you do not care about protocol-count
-  mismatches.
-- **`recv_fds_exact`** validates the descriptor count: it errors with
-  `InvalidData` unless the peer sent exactly `N`. Use it when a count
-  mismatch means the protocol is broken and the connection should be
-  discarded. Surplus descriptors are still closed before the error.
-- **Datagram methods** reject payload truncation with `InvalidData`. To
-  inspect a truncated datagram instead of failing, use `cmsg_recvmsg` and
-  read `RecvResult::data_truncated`.
-- **Stream callers needing boundaries** (which descriptors belong to which
-  message) should use a datagram socket or frame the stream themselves — a
-  receive call may return bytes or
-  descriptors from multiple sends, or only part of one send.
-
 ## Async (tokio)
 
 Enable the `tokio` feature — blocking users pull in no extra dependencies:
 
 ```toml
 [dependencies]
-unix-ancillary = { version = "0.4", features = ["tokio"] }
+unix-ancillary = { version = "0.2", features = ["tokio"] }
 ```
 
 The async API mirrors the blocking one on `tokio::net::UnixStream` /

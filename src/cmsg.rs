@@ -7,15 +7,7 @@ use crate::platform;
 pub(crate) struct RecvMsgResult {
     pub bytes_read: usize,
     pub ancillary_len: usize,
-    pub ancillary_truncated: bool,
-    pub data_truncated: bool,
-}
-
-/// Send ordinary bytes without ancillary data, using the same signal-safe
-/// flags and EINTR behavior as descriptor sends.
-pub(crate) fn send_bytes(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
-    let iov = [io::IoSlice::new(data)];
-    sendmsg_vectored(fd, &iov, &[], 0)
+    pub truncated: bool,
 }
 
 /// Send data and ancillary control messages over a Unix socket.
@@ -39,18 +31,11 @@ pub(crate) fn sendmsg_vectored(
 
     // SAFETY: msghdr fully populated; iov and ancillary_buf borrowed for the
     // syscall duration; fd is a valid descriptor.
-    platform::prepare_send(fd.as_raw_fd())?;
-    loop {
-        // SAFETY: same justification as above; SEND_FLAGS is defined by
-        // platform.rs for every target.
-        let ret = unsafe { libc::sendmsg(fd.as_raw_fd(), &msg, platform::SEND_FLAGS) };
-        if ret >= 0 {
-            return Ok(ret as usize);
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::Interrupted {
-            return Err(err);
-        }
+    let ret = unsafe { libc::sendmsg(fd.as_raw_fd(), &msg, 0) };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret as usize)
     }
 }
 
@@ -73,23 +58,14 @@ pub(crate) fn recvmsg_vectored(
 
     // SAFETY: msghdr fully populated; ancillary_buf borrowed mutably for the
     // syscall duration; fd is a valid descriptor.
-    let ret = loop {
-        let ret = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, platform::RECV_FLAGS) };
-        if ret >= 0 {
-            break ret;
-        }
-        let err = io::Error::last_os_error();
-        // Retry interrupted syscalls, but surface `WouldBlock` unchanged so
-        // readiness adapters can retry when the socket becomes ready.
-        if err.kind() != io::ErrorKind::Interrupted {
-            return Err(err);
-        }
-    };
+    let ret = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, platform::RECV_FLAGS) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
 
     #[allow(clippy::unnecessary_cast)]
     let ancillary_len = msg.msg_controllen as usize;
-    let ancillary_truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
-    let data_truncated = (msg.msg_flags & libc::MSG_TRUNC) != 0;
+    let truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
 
     // On non-CLOEXEC platforms, set the flag now. If this fails, the helper
     // closes every fd it found before returning the error.
@@ -98,7 +74,6 @@ pub(crate) fn recvmsg_vectored(
     Ok(RecvMsgResult {
         bytes_read: ret as usize,
         ancillary_len,
-        ancillary_truncated,
-        data_truncated,
+        truncated,
     })
 }

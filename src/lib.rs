@@ -60,31 +60,6 @@
 //! assert_eq!(&recv.data[..], b"hello");
 //! assert_eq!(recv.fds.len(), 1);
 //! ```
-//!
-//! # Stream semantics
-//!
-//! Unix streams do not preserve send-call boundaries: a receive call may
-//! return bytes or descriptors from multiple sends, or only part of one send.
-//! Use a framed protocol (or a datagram / seqpacket socket) when
-//! descriptor-to-message association matters. Sending one or more descriptors
-//! over a stream requires at least one payload byte.
-//!
-//! # Choosing a send / receive method
-//!
-//! - [`UnixStreamExt::send_fds`] is one `sendmsg` — a single atomic call,
-//!   not a message transaction. A partial accept leaves descriptors
-//!   delivered and bytes pending.
-//! - [`UnixStreamExt::send_fds_all`] sends descriptors exactly once, then
-//!   completes the remaining ordinary bytes with signal-safe sends.
-//! - [`UnixStreamExt::recv_fds`] is permissive: up to `N` descriptors, and
-//!   surplus descriptors are closed automatically.
-//! - [`UnixStreamExt::recv_fds_exact`] validates the descriptor count,
-//!   returning `InvalidData` unless the peer sent exactly `N`.
-//! - Datagram methods reject payload truncation with `InvalidData`; use
-//!   [`cmsg_recvmsg`] to inspect a truncated datagram via
-//!   [`RecvResult::data_truncated`].
-//! - Sends are `SIGPIPE`-safe (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`) and retry
-//!   internally on `EINTR`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -112,15 +87,11 @@ use std::os::unix::io::BorrowedFd;
 
 /// Result returned by [`cmsg_recvmsg`].
 #[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
 pub struct RecvResult {
     /// Bytes written into the iov buffers.
     pub bytes_read: usize,
     /// `true` if `MSG_CTRUNC` was set on the underlying `recvmsg`.
     pub truncated: bool,
-    /// `true` if `MSG_TRUNC` was set: the datagram payload did not fit the
-    /// iov buffers and was truncated. Stream sockets never set this.
-    pub data_truncated: bool,
 }
 
 /// Send data with ancillary control messages over a Unix socket.
@@ -148,10 +119,9 @@ pub fn cmsg_recvmsg(
 ) -> io::Result<RecvResult> {
     let result = cmsg::recvmsg_vectored(fd, iov, ancillary.buffer)?;
     ancillary.length = result.ancillary_len;
-    ancillary.truncated = result.ancillary_truncated;
+    ancillary.truncated = result.truncated;
     Ok(RecvResult {
         bytes_read: result.bytes_read,
-        truncated: result.ancillary_truncated,
-        data_truncated: result.data_truncated,
+        truncated: result.truncated,
     })
 }

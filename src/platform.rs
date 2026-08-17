@@ -166,17 +166,6 @@ mod inner {
     /// set `FD_CLOEXEC` atomically.
     pub(crate) const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
 
-    /// Flags passed to `sendmsg`. `MSG_NOSIGNAL` suppresses the `SIGPIPE`
-    /// that a write to a closed peer would otherwise raise, turning it into
-    /// an `EPIPE` error instead.
-    pub(crate) const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
-
-    /// No-op on platforms with `MSG_NOSIGNAL` — the flag handles it.
-    #[inline]
-    pub(crate) fn prepare_send(_fd: std::os::unix::io::RawFd) -> io::Result<()> {
-        Ok(())
-    }
-
     /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
     #[inline]
     pub(crate) fn cloexec_received(_buf: &[u8]) -> io::Result<()> {
@@ -209,60 +198,6 @@ mod inner {
     pub(crate) const RECV_FLAGS: libc::c_int = 0;
 
     pub(crate) use super::fallback::{cloexec_received, max_recv_fds};
-
-    #[cfg(target_vendor = "apple")]
-    mod send_flags {
-        use std::io;
-        use std::mem;
-        use std::os::unix::io::RawFd;
-
-        /// Flags passed to `sendmsg` on Apple platforms. macOS lacks
-        /// `MSG_NOSIGNAL`, so `SO_NOSIGPIPE` is set once per send instead
-        /// (see [`prepare_send`]).
-        pub(crate) const SEND_FLAGS: libc::c_int = 0;
-
-        /// Suppress `SIGPIPE` on Apple platforms via `SO_NOSIGPIPE`. This
-        /// costs one extra syscall per send because the extension traits hold
-        /// no per-socket state; `FdChannel` will own its socket and can hoist
-        /// this to construction.
-        pub(crate) fn prepare_send(fd: RawFd) -> io::Result<()> {
-            let on: libc::c_int = 1;
-            // SAFETY: fd is a live socket; setsockopt is always defined and
-            // we propagate any errno the kernel returns.
-            let ret = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_NOSIGPIPE,
-                    (&on as *const libc::c_int).cast(),
-                    mem::size_of_val(&on) as libc::socklen_t,
-                )
-            };
-            if ret < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    /// Unknown Unix targets (illumos, Solaris, AIX) have no portable
-    /// `sendmsg` signal suppression in libc. Sends are not `SIGPIPE`-safe;
-    /// set `SIGPIPE` to `SIG_IGN` (or handle it) in your process, or the
-    /// kernel may terminate it on a write to a closed peer.
-    #[cfg(not(target_vendor = "apple"))]
-    mod send_flags {
-        use std::io;
-        use std::os::unix::io::RawFd;
-
-        pub(crate) const SEND_FLAGS: libc::c_int = 0;
-
-        pub(crate) fn prepare_send(_fd: RawFd) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    pub(crate) use send_flags::{prepare_send, SEND_FLAGS};
 }
 
 pub(crate) use inner::*;

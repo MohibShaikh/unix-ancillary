@@ -27,10 +27,6 @@ jobs:
       - run: cargo build --verbose --all-targets
       - run: cargo test --verbose
       - run: cargo test --verbose --all-features
-      - name: Verify SIGPIPE-safe send behavior
-        run: cargo test --test fd_passing send_to_closed_peer_returns_error_without_sigpipe -- --nocapture
-      - name: Verify descriptor leak regressions
-        run: cargo test --test fd_leak -- --nocapture
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo fmt --all -- --check
 
@@ -42,7 +38,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.75.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --verbose
-      - run: cargo test
 
   docs:
     name: docs
