@@ -54,3 +54,12 @@ async fn async_datagram_send_recv_fd() {
     assert_eq!(&recv.data[..], b"dgram");
     assert_eq!(recv.fds.len(), 1);
 }
+
+#[tokio::test]
+async fn async_stream_rejects_fds_without_payload_byte() {
+    let (tx, _rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+
+    let err = tx.send_fds(b"", &[&file]).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}

@@ -28,7 +28,8 @@ Never mark work complete here without recording the exact verification command a
 - Rust edition: 2021
 - Declared MSRV: Rust 1.75
 - Durable initiative: `build-unix-ancillary-into-a-production-capability-channel`
-- Current phase: Phase 1, baseline verification and architecture planning
+- Current phase: Phase 2, core correctness hardening Task 2
+- Phase 2 Task 1 completed on 2026-08-17 on branch `feat/phase2-core-hardening` (a new branch carrying the reviewed plan edits; the planning commit `1d75576` is its base). Red state observed first: both new tests failed with `unwrap_err()` on `Ok(0)`; after `validate_stream_send` in `src/ext.rs` and calls in `UnixStreamExt::send_fds` and `AsyncUnixStreamExt::send_fds`, `cargo test --test fd_passing` (9 tests) and `cargo test --all-features --test async_fd` (4 tests) pass in Docker on Rust 1.97.1.
 - Baseline Docker status: complete on Rust 1.97.1; build, tests, doctests, rustdoc, Clippy, fmt, and all four public examples pass
 - Last updated: 2026-08-17 UTC
 
@@ -37,9 +38,11 @@ Never mark work complete here without recording the exact verification command a
 Implement the approved roadmap in independently testable and committed phases:
 
 1. Core correctness hardening.
-2. Power-user low-level APIs.
-3. Authenticated, message-oriented `FdChannel`.
-4. Multiprocess examples, security assets, benchmarks, migration guides, and release readiness.
+2. Peer credentials and shared runtime-neutral internals.
+3. Multiprocess examples, security assets, migration guides, and release readiness, targeting one real downstream dependent.
+4. Authenticated, message-oriented `FdChannel`, only if a named downstream user asks for it.
+
+Reordered and narrowed on 2026-08-17. Do not build reusable receive buffers, unconnected datagram addressing, spawn helpers, or seqpacket transport: `rustix`, `uds`, `command-fds`, and `tokio-seqpacket` already ship them. See the Prior art section of the design spec.
 
 ## Non-negotiable constraints
 
@@ -168,8 +171,9 @@ Do not create these files blindly. Follow the committed implementation plan and 
 - [x] Create this live `AGENTS.md` handoff ledger.
 - [x] Write architecture design to `docs/superpowers/specs/2026-08-17-production-capability-channel-design.md`.
 - [x] Write the execution roadmap and detailed Phase 2 plan under `docs/superpowers/plans/`.
-- [ ] Commit the handoff, design, and plans.
-- [ ] Begin Phase 2 core hardening with TDD.
+- [x] Commit the handoff, design, and plans as `1d75576`.
+- [x] Phase 2 Task 1: enforce the Unix stream fd payload contract (`fix: enforce Unix stream fd payload contract`).
+- [ ] Phase 2 Task 2: SIGPIPE-safe and EINTR-resilient syscalls.
 
 ## Known correctness gaps to address
 
@@ -179,8 +183,8 @@ Do not create these files blindly. Follow the committed implementation plan and 
 4. `sendmsg` currently uses flag `0`, leaving a potential `SIGPIPE` process-termination path.
 5. Datagram payload truncation is not surfaced independently from ancillary truncation.
 6. Surplus descriptor closing is safe but can hide protocol count mismatches.
-7. High-level calls allocate descriptor and ancillary storage per operation.
-8. Peer credentials, unconnected datagram addressing, and BSD execution coverage are missing.
+7. High-level calls allocate descriptor and ancillary storage per operation. Accepted, not a gap: `rustix` owns the reusable-buffer story.
+8. Peer credentials and BSD execution coverage are missing. Unconnected datagram addressing is delegated to `uds`.
 
 ## Last session activity
 
@@ -192,6 +196,10 @@ Do not create these files blindly. Follow the committed implementation plan and 
 - Created the durable initiative and milestone structure.
 - Pulled official `rust:latest` Docker image.
 - Corrected Docker acceptance passed all builds, default and all-feature tests, doctests, rustdoc, Clippy, fmt, and the four shipped public examples on Rust 1.97.1.
+- Committed the durable handoff, approved design, execution roadmap, and detailed Phase 2 plan as `1d75576` (`docs: plan production capability channel roadmap`).
+- The first Phase 2 Task 1 implementer dispatch on OpenAI `gpt-5.5` failed before editing because the provider usage limit was reached. Task state is intact in `AGENTS.md` and the SDD ledger. Retry uses an Anthropic worker.
+- Reviewed the Phase 2 plan against the source before implementation and corrected six items: the SIGPIPE regression test could not go red because Rust's runtime sets `SIGPIPE` to `SIG_IGN`; `send_fds_all` finished its payload with `write(2)` and bypassed the signal-safe helper added two steps earlier; its snippet did not compile; the `RecvResult` change is a source break needing a `0.4.0` bump and a changelog; strict datagram receives leave `cmsg_recvmsg` as the only lenient path; and `compile_error!` on unlisted Unix targets would newly break illumos, Solaris, and AIX.
+- Measured crates.io on 2026-08-17: `sendfd` 2,285,277 downloads per 90 days from 13 direct dependents, `uds` 1,359,468 from 10, `ipc-channel` 804,818 from 54, `fd-queue` 143 from 1, `unix-ancillary` 246 from 0. Downloads track dependents, not features. Roadmap narrowed and reordered accordingly.
 - First Docker acceptance attempt failed only because login-shell `PATH` omitted Rust binaries. No project test result was produced by that attempt.
 
 ## Exact resume instructions
@@ -200,7 +208,7 @@ Do not create these files blindly. Follow the committed implementation plan and 
 2. Run `git status --short` and confirm the current branch is `feat/production-capability-channel` and no unrelated changes will be overwritten.
 3. Check the durable initiative `build-unix-ancillary-into-a-production-capability-channel`.
 4. Baseline acceptance is complete. Re-run the canonical Docker workflow after each implementation milestone.
-5. Review the design and Phase 2 plan, then continue at Phase 2 Task 1.
-6. Commit the handoff, design, roadmap, and Phase 2 plan before implementation.
+5. Read `docs/superpowers/specs/2026-08-17-production-capability-channel-design.md` and `docs/superpowers/plans/2026-08-17-core-correctness-hardening.md`.
+6. Continue at Phase 2 Task 1 using TDD. The planning commit is `1d75576`.
 7. Use `superpowers:test-driven-development` for every feature or bug fix.
 8. Update this file after each test cycle and commit.

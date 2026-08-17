@@ -119,3 +119,19 @@ fn ancillary_buffer_too_small() {
     let file = tempfile::tempfile().unwrap();
     assert!(ancillary.add_fds(&[file.as_fd()]).is_err());
 }
+
+#[test]
+fn stream_rejects_fds_without_payload_byte() {
+    let (tx, _rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+
+    let err = tx.send_fds(b"", &[&file]).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[test]
+fn stream_allows_empty_payload_without_fds() {
+    let (tx, _rx) = UnixStream::pair().unwrap();
+    let empty: &[std::fs::File] = &[];
+    assert_eq!(tx.send_fds(b"", empty).unwrap(), 0);
+}

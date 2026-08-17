@@ -18,7 +18,8 @@ use tokio::io::Interest;
 use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::ext::{
-    recv_fds_into_impl, send_fds_impl, ReceivedFds, DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
+    recv_fds_into_impl, send_fds_impl, validate_stream_send, ReceivedFds, DEFAULT_DATAGRAM_BUF,
+    DEFAULT_STREAM_BUF,
 };
 
 /// Async fd passing on tokio's [`UnixStream`].
@@ -27,6 +28,13 @@ use crate::ext::{
 /// semantics, including surplus-fd closing and CLOEXEC handling.
 pub trait AsyncUnixStreamExt {
     /// Send `data` plus borrowed file descriptors. Caller retains ownership.
+    ///
+    /// Unix streams do not preserve send-call boundaries. A receive call may
+    /// return bytes or descriptors from multiple sends, or only part of one
+    /// send. Use a framed protocol when descriptor-to-message association
+    /// matters.
+    ///
+    /// Sending one or more descriptors requires at least one payload byte.
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
 
     /// Receive data and up to `N` file descriptors. Surplus fds beyond `N`
@@ -43,6 +51,7 @@ pub trait AsyncUnixStreamExt {
 
 impl AsyncUnixStreamExt for UnixStream {
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
+        validate_stream_send(data, fds.len())?;
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         self.async_io(Interest::WRITABLE, || {
             send_fds_impl(self.as_fd(), data, &borrowed)

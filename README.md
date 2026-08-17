@@ -80,6 +80,12 @@ assert_eq!(recv.fds.len(), 1);
 // recv.fds[0] is an OwnedFd — automatically closed on drop
 ```
 
+> **Stream semantics:** Unix streams do not preserve send-call boundaries. A
+> receive call may return bytes or descriptors from multiple sends, or only
+> part of one send. Use a framed protocol when descriptor-to-message
+> association matters. Sending one or more descriptors over a stream requires
+> at least one payload byte.
+
 ## Bring-your-own buffer
 
 ```rust

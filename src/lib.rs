@@ -60,6 +60,14 @@
 //! assert_eq!(&recv.data[..], b"hello");
 //! assert_eq!(recv.fds.len(), 1);
 //! ```
+//!
+//! # Stream semantics
+//!
+//! Unix streams do not preserve send-call boundaries: a receive call may
+//! return bytes or descriptors from multiple sends, or only part of one send.
+//! Use a framed protocol (or a datagram / seqpacket socket) when
+//! descriptor-to-message association matters. Sending one or more descriptors
+//! over a stream requires at least one payload byte.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
