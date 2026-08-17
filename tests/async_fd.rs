@@ -99,3 +99,51 @@ async fn async_datagram_payload_truncation_is_an_error() {
     let err = rx.recv_fds_into::<0>(&mut small).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
+
+#[tokio::test]
+async fn async_recv_exact_accepts_exact_count() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let first = tempfile::tempfile().unwrap();
+    let second = tempfile::tempfile().unwrap();
+    tx.send_fds(b"two", &[&first, &second]).await.unwrap();
+
+    let received = rx.recv_fds_exact::<2>().await.unwrap();
+    assert_eq!(received.data, b"two");
+    assert_eq!(received.fds.len(), 2);
+}
+
+#[tokio::test]
+async fn async_recv_exact_rejects_too_few() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"one", &[&file]).await.unwrap();
+
+    let err = rx.recv_fds_exact::<2>().await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn async_recv_exact_rejects_too_many() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let first = tempfile::tempfile().unwrap();
+    let second = tempfile::tempfile().unwrap();
+    let third = tempfile::tempfile().unwrap();
+    tx.send_fds(b"three", &[&first, &second, &third])
+        .await
+        .unwrap();
+
+    let err = rx.recv_fds_exact::<2>().await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[tokio::test]
+async fn async_recv_exact_datagram_accepts_exact_count() {
+    let (tx, rx) = UnixDatagram::pair().unwrap();
+    let first = tempfile::tempfile().unwrap();
+    let second = tempfile::tempfile().unwrap();
+    tx.send_fds(b"dg", &[&first, &second]).await.unwrap();
+
+    let received = rx.recv_fds_exact::<2>().await.unwrap();
+    assert_eq!(received.data, b"dg");
+    assert_eq!(received.fds.len(), 2);
+}

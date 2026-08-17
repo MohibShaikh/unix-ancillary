@@ -17,6 +17,22 @@ pub(crate) enum SocketKind {
     Datagram,
 }
 
+/// Descriptor-count policy for a receive. Up-to keeps the first `N` and
+/// closes the surplus; exact errors unless the peer sent exactly `N`.
+#[derive(Clone, Copy)]
+pub(crate) enum CountMode {
+    UpTo(usize),
+    Exact(usize),
+}
+
+impl CountMode {
+    fn count(self) -> usize {
+        match self {
+            CountMode::UpTo(n) | CountMode::Exact(n) => n,
+        }
+    }
+}
+
 /// Result of a successful `recv_fds` call.
 ///
 /// Truncation is a hard error in the high-level API: if you observe a
@@ -80,12 +96,13 @@ pub(crate) fn send_fds_impl(
 /// wrapped in `OwnedFd` and dropped before returning, closing them. If the
 /// kernel still reports `MSG_CTRUNC` (defensive — should be unreachable),
 /// every fd we extracted is closed and an error is returned.
-pub(crate) fn recv_fds_into_impl<const N: usize>(
+pub(crate) fn recv_fds_into_impl(
     fd: BorrowedFd<'_>,
     data_buf: &mut [u8],
     kind: SocketKind,
+    mode: CountMode,
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    let cap = N.max(platform::max_recv_fds());
+    let cap = mode.count().max(platform::max_recv_fds());
     let mut anc_buf = vec![0u8; SocketAncillary::buffer_size_for_rights(cap)];
 
     let mut iov = [io::IoSliceMut::new(data_buf)];
@@ -97,8 +114,8 @@ pub(crate) fn recv_fds_into_impl<const N: usize>(
         truncated: result.ancillary_truncated,
     };
 
-    // Wrap every fd the kernel handed us. Surplus past `N` are dropped at
-    // function exit, closing them and preventing leaks.
+    // Wrap every fd the kernel handed us. Surplus past the mode are dropped
+    // at function exit, closing them and preventing leaks.
     let mut all_fds: Vec<OwnedFd> = Vec::new();
     for msg in ancillary.messages() {
         match msg {
@@ -130,10 +147,26 @@ pub(crate) fn recv_fds_into_impl<const N: usize>(
         ));
     }
 
-    // Keep first N; remaining `OwnedFd`s drop here, closing surplus fds.
-    let kept: Vec<OwnedFd> = all_fds.into_iter().take(N).collect();
-
-    Ok((result.bytes_read, kept))
+    match mode {
+        CountMode::UpTo(n) => {
+            // Keep first n; remaining `OwnedFd`s drop here, closing surplus.
+            let kept: Vec<OwnedFd> = all_fds.into_iter().take(n).collect();
+            Ok((result.bytes_read, kept))
+        }
+        CountMode::Exact(n) => {
+            if all_fds.len() != n {
+                let observed = all_fds.len();
+                // Close every received descriptor before reporting the count
+                // mismatch; the caller must not observe a partial set.
+                drop(all_fds);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("expected exactly {n} file descriptors, received {observed}"),
+                ));
+            }
+            Ok((result.bytes_read, all_fds))
+        }
+    }
 }
 
 /// Extension trait for `UnixStream` adding fd-passing convenience methods.
@@ -169,6 +202,20 @@ pub trait UnixStreamExt {
     /// Like [`recv_fds`](Self::recv_fds) but writes data into a
     /// caller-supplied buffer. Returns `(bytes_read, fds)`.
     fn recv_fds_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
+
+    /// Receive data and exactly `N` file descriptors.
+    ///
+    /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
+    /// when the peer sends fewer or more than `N` descriptors. Surplus
+    /// descriptors are still closed before the error is returned.
+    fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
+
+    /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
+    /// caller-supplied buffer. Returns `(bytes_read, fds)`.
+    fn recv_fds_exact_into<const N: usize>(
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)>;
@@ -208,7 +255,12 @@ impl UnixStreamExt for UnixStream {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        let (n, fds) = recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Stream)?;
+        let (n, fds) = recv_fds_into_impl(
+            self.as_fd(),
+            &mut data_buf,
+            SocketKind::Stream,
+            CountMode::UpTo(N),
+        )?;
         data_buf.truncate(n);
         Ok(ReceivedFds {
             data: data_buf,
@@ -221,7 +273,40 @@ impl UnixStreamExt for UnixStream {
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl::<N>(self.as_fd(), data_buf, SocketKind::Stream)
+        recv_fds_into_impl(
+            self.as_fd(),
+            data_buf,
+            SocketKind::Stream,
+            CountMode::UpTo(N),
+        )
+    }
+
+    fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
+        let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
+        let (n, fds) = recv_fds_into_impl(
+            self.as_fd(),
+            &mut data_buf,
+            SocketKind::Stream,
+            CountMode::Exact(N),
+        )?;
+        data_buf.truncate(n);
+        Ok(ReceivedFds {
+            data: data_buf,
+            fds,
+            data_truncated: false,
+        })
+    }
+
+    fn recv_fds_exact_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        recv_fds_into_impl(
+            self.as_fd(),
+            data_buf,
+            SocketKind::Stream,
+            CountMode::Exact(N),
+        )
     }
 }
 
@@ -248,6 +333,20 @@ pub trait UnixDatagramExt {
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)>;
+
+    /// Receive data and exactly `N` file descriptors.
+    ///
+    /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
+    /// when the peer sends fewer or more than `N` descriptors. Surplus
+    /// descriptors are still closed before the error is returned.
+    fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
+
+    /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
+    /// caller-supplied buffer. Returns `(bytes_read, fds)`.
+    fn recv_fds_exact_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
 }
 
 impl UnixDatagramExt for UnixDatagram {
@@ -258,7 +357,12 @@ impl UnixDatagramExt for UnixDatagram {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        let (n, fds) = recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Datagram)?;
+        let (n, fds) = recv_fds_into_impl(
+            self.as_fd(),
+            &mut data_buf,
+            SocketKind::Datagram,
+            CountMode::UpTo(N),
+        )?;
         data_buf.truncate(n);
         Ok(ReceivedFds {
             data: data_buf,
@@ -271,6 +375,39 @@ impl UnixDatagramExt for UnixDatagram {
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl::<N>(self.as_fd(), data_buf, SocketKind::Datagram)
+        recv_fds_into_impl(
+            self.as_fd(),
+            data_buf,
+            SocketKind::Datagram,
+            CountMode::UpTo(N),
+        )
+    }
+
+    fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
+        let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
+        let (n, fds) = recv_fds_into_impl(
+            self.as_fd(),
+            &mut data_buf,
+            SocketKind::Datagram,
+            CountMode::Exact(N),
+        )?;
+        data_buf.truncate(n);
+        Ok(ReceivedFds {
+            data: data_buf,
+            fds,
+            data_truncated: false,
+        })
+    }
+
+    fn recv_fds_exact_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        recv_fds_into_impl(
+            self.as_fd(),
+            data_buf,
+            SocketKind::Datagram,
+            CountMode::Exact(N),
+        )
     }
 }

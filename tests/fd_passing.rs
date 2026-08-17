@@ -192,3 +192,49 @@ fn datagram_payload_truncation_is_an_error() {
     let err = rx.recv_fds_into::<0>(&mut small).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
+
+#[test]
+fn recv_exact_accepts_exact_count() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let first = tempfile::tempfile().unwrap();
+    let second = tempfile::tempfile().unwrap();
+    tx.send_fds(b"two", &[&first, &second]).unwrap();
+
+    let received = rx.recv_fds_exact::<2>().unwrap();
+    assert_eq!(received.data, b"two");
+    assert_eq!(received.fds.len(), 2);
+}
+
+#[test]
+fn recv_exact_rejects_too_few() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"one", &[&file]).unwrap();
+
+    let err = rx.recv_fds_exact::<2>().unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn recv_exact_rejects_too_many() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let first = tempfile::tempfile().unwrap();
+    let second = tempfile::tempfile().unwrap();
+    let third = tempfile::tempfile().unwrap();
+    tx.send_fds(b"three", &[&first, &second, &third]).unwrap();
+
+    let err = rx.recv_fds_exact::<2>().unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn recv_exact_datagram_accepts_exact_count() {
+    let (tx, rx) = UnixDatagram::pair().unwrap();
+    let first = tempfile::tempfile().unwrap();
+    let second = tempfile::tempfile().unwrap();
+    tx.send_fds(b"dg", &[&first, &second]).unwrap();
+
+    let received = rx.recv_fds_exact::<2>().unwrap();
+    assert_eq!(received.data, b"dg");
+    assert_eq!(received.fds.len(), 2);
+}

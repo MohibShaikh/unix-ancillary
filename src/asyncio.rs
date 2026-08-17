@@ -19,7 +19,7 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    recv_fds_into_impl, send_fds_impl, validate_stream_send, ReceivedFds, SocketKind,
+    recv_fds_into_impl, send_fds_impl, validate_stream_send, CountMode, ReceivedFds, SocketKind,
     DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
 
@@ -57,6 +57,20 @@ pub trait AsyncUnixStreamExt {
     /// Like [`recv_fds`](Self::recv_fds) but writes data into a
     /// caller-supplied buffer. Returns `(bytes_read, fds)`.
     async fn recv_fds_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
+
+    /// Receive data and exactly `N` file descriptors.
+    ///
+    /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
+    /// when the peer sends fewer or more than `N` descriptors. Surplus
+    /// descriptors are still closed before the error is returned.
+    async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
+
+    /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
+    /// caller-supplied buffer. Returns `(bytes_read, fds)`.
+    async fn recv_fds_exact_into<const N: usize>(
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)>;
@@ -109,7 +123,12 @@ impl AsyncUnixStreamExt for UnixStream {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
         let (n, fds) = self
             .async_io(Interest::READABLE, || {
-                recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Stream)
+                recv_fds_into_impl(
+                    self.as_fd(),
+                    &mut data_buf,
+                    SocketKind::Stream,
+                    CountMode::UpTo(N),
+                )
             })
             .await?;
         data_buf.truncate(n);
@@ -125,7 +144,47 @@ impl AsyncUnixStreamExt for UnixStream {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl::<N>(self.as_fd(), &mut *data_buf, SocketKind::Stream)
+            recv_fds_into_impl(
+                self.as_fd(),
+                &mut *data_buf,
+                SocketKind::Stream,
+                CountMode::UpTo(N),
+            )
+        })
+        .await
+    }
+
+    async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
+        let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
+        let (n, fds) = self
+            .async_io(Interest::READABLE, || {
+                recv_fds_into_impl(
+                    self.as_fd(),
+                    &mut data_buf,
+                    SocketKind::Stream,
+                    CountMode::Exact(N),
+                )
+            })
+            .await?;
+        data_buf.truncate(n);
+        Ok(ReceivedFds {
+            data: data_buf,
+            fds,
+            data_truncated: false,
+        })
+    }
+
+    async fn recv_fds_exact_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        self.async_io(Interest::READABLE, || {
+            recv_fds_into_impl(
+                self.as_fd(),
+                &mut *data_buf,
+                SocketKind::Stream,
+                CountMode::Exact(N),
+            )
         })
         .await
     }
@@ -151,6 +210,20 @@ pub trait AsyncUnixDatagramExt {
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)>;
+
+    /// Receive data and exactly `N` file descriptors.
+    ///
+    /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
+    /// when the peer sends fewer or more than `N` descriptors. Surplus
+    /// descriptors are still closed before the error is returned.
+    async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
+
+    /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
+    /// caller-supplied buffer. Returns `(bytes_read, fds)`.
+    async fn recv_fds_exact_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
 }
 
 impl AsyncUnixDatagramExt for UnixDatagram {
@@ -166,7 +239,12 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
         let (n, fds) = self
             .async_io(Interest::READABLE, || {
-                recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Datagram)
+                recv_fds_into_impl(
+                    self.as_fd(),
+                    &mut data_buf,
+                    SocketKind::Datagram,
+                    CountMode::UpTo(N),
+                )
             })
             .await?;
         data_buf.truncate(n);
@@ -182,7 +260,47 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl::<N>(self.as_fd(), &mut *data_buf, SocketKind::Datagram)
+            recv_fds_into_impl(
+                self.as_fd(),
+                &mut *data_buf,
+                SocketKind::Datagram,
+                CountMode::UpTo(N),
+            )
+        })
+        .await
+    }
+
+    async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
+        let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
+        let (n, fds) = self
+            .async_io(Interest::READABLE, || {
+                recv_fds_into_impl(
+                    self.as_fd(),
+                    &mut data_buf,
+                    SocketKind::Datagram,
+                    CountMode::Exact(N),
+                )
+            })
+            .await?;
+        data_buf.truncate(n);
+        Ok(ReceivedFds {
+            data: data_buf,
+            fds,
+            data_truncated: false,
+        })
+    }
+
+    async fn recv_fds_exact_into<const N: usize>(
+        &self,
+        data_buf: &mut [u8],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        self.async_io(Interest::READABLE, || {
+            recv_fds_into_impl(
+                self.as_fd(),
+                &mut *data_buf,
+                SocketKind::Datagram,
+                CountMode::Exact(N),
+            )
         })
         .await
     }
