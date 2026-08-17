@@ -135,7 +135,6 @@ impl AsyncUnixStreamExt for UnixStream {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 
@@ -170,7 +169,6 @@ impl AsyncUnixStreamExt for UnixStream {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 
@@ -251,7 +249,6 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 
@@ -286,7 +283,6 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 

@@ -210,7 +210,7 @@ mod inner {
 
     pub(crate) use super::fallback::{cloexec_received, max_recv_fds};
 
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     mod send_flags {
         use std::io;
         use std::mem;
@@ -250,7 +250,7 @@ mod inner {
     /// `sendmsg` signal suppression in libc. Sends are not `SIGPIPE`-safe;
     /// set `SIGPIPE` to `SIG_IGN` (or handle it) in your process, or the
     /// kernel may terminate it on a write to a closed peer.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     mod send_flags {
         use std::io;
         use std::os::unix::io::RawFd;

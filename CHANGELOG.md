@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.0] - in development
+## [0.4.0] - 2026-08-17
 
 ### Behavior changes (breaking)
 
@@ -13,8 +13,6 @@
 - `RecvResult` is now `#[non_exhaustive]` and gains a `data_truncated`
   field. Struct literals and exhaustive destructuring no longer compile
   against it; construct it through `cmsg_recvmsg` instead.
-- `ReceivedFds` gains a `data_truncated` field. It is always `false` from
-  the extension traits; only `cmsg_recvmsg` can produce a `true` value.
 
 ### Added
 
@@ -29,7 +27,8 @@
 ### Hardening
 
 - `sendmsg` uses `MSG_NOSIGNAL` on supported platforms (Linux, Android,
-  FreeBSD, DragonFly, NetBSD, OpenBSD) and `SO_NOSIGPIPE` on Apple, so a
+  FreeBSD, DragonFly, NetBSD, OpenBSD) and `SO_NOSIGPIPE` on Apple targets
+  (`target_vendor = "apple"`), so a
   write to a closed peer returns `BrokenPipe` instead of terminating the
   process with `SIGPIPE`.
 - `sendmsg` and `recvmsg` retry internally on `EINTR`, preserving

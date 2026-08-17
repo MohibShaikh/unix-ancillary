@@ -90,6 +90,58 @@ async fn async_send_fds_all_transfers_payload_and_descriptor() {
     assert_eq!(received, expected);
 }
 
+/// See the blocking `shrink_sndbuf`: forces the first `sendmsg` to be short so
+/// the completion loop in `send_fds_all` actually runs.
+fn shrink_sndbuf(s: &UnixStream) {
+    use std::os::unix::io::AsRawFd;
+    let v: libc::c_int = 2048;
+    // SAFETY: live socket, correct option length for SO_SNDBUF.
+    let ret = unsafe {
+        libc::setsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&v as *const libc::c_int).cast(),
+            std::mem::size_of_val(&v) as libc::socklen_t,
+        )
+    };
+    assert_eq!(ret, 0, "setsockopt(SO_SNDBUF) failed");
+}
+
+#[tokio::test]
+async fn async_partial_first_send_delivers_exactly_one_descriptor() {
+    const SIZE: usize = 128 * 1024;
+
+    let (tx, rx) = UnixStream::pair().unwrap();
+    shrink_sndbuf(&tx);
+    let file = tempfile::tempfile().unwrap();
+    let payload = vec![b'x'; SIZE];
+
+    let sender = tokio::spawn(async move {
+        tx.send_fds_all(&payload, &[&file]).await.unwrap();
+    });
+
+    // recvmsg on every read: a retransmitted descriptor delivered to a plain
+    // read() would be closed by the kernel and go unnoticed.
+    let first = rx.recv_fds::<8>().await.unwrap();
+    let mut seen_fds = first.fds.len();
+    let mut total = first.data.len();
+    while total < SIZE {
+        let mut buf = [0u8; 8192];
+        let (n, extra) = rx.recv_fds_into::<8>(&mut buf).await.unwrap();
+        assert_ne!(n, 0);
+        seen_fds += extra.len();
+        total += n;
+    }
+    sender.await.unwrap();
+
+    assert_eq!(total, SIZE);
+    assert_eq!(
+        seen_fds, 1,
+        "descriptor retransmitted across the partial send"
+    );
+}
+
 #[tokio::test]
 async fn async_datagram_payload_truncation_is_an_error() {
     let (tx, rx) = UnixDatagram::pair().unwrap();

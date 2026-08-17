@@ -10,7 +10,7 @@ pub(crate) const DEFAULT_STREAM_BUF: usize = 4096;
 pub(crate) const DEFAULT_DATAGRAM_BUF: usize = 65536;
 
 /// Whether the receive operation is a stream or a datagram. Datagrams reject
-/// payload truncation; streams report it but continue.
+/// payload truncation; streams cannot truncate and ignore the flag.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketKind {
     Stream,
@@ -40,10 +40,10 @@ impl CountMode {
 /// accounted for. Surplus fds beyond the caller's requested `N` are closed
 /// automatically before this struct is returned.
 ///
-/// `data_truncated` is always `false` on stream sockets. Datagram
-/// convenience methods reject payload truncation entirely, so a
-/// `data_truncated == true` value is only observable through
-/// [`crate::cmsg_recvmsg`].
+/// Payload truncation is not reported here: stream sockets never truncate,
+/// and the datagram methods fail with `InvalidData` rather than returning a
+/// short payload. Use [`crate::cmsg_recvmsg`] and read
+/// [`crate::RecvResult::data_truncated`] to inspect a truncated datagram.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReceivedFds {
@@ -52,9 +52,6 @@ pub struct ReceivedFds {
     /// File descriptors received, capped at `N`. Each `OwnedFd` is closed on
     /// drop.
     pub fds: Vec<OwnedFd>,
-    /// `true` if `MSG_TRUNC` was set on the underlying `recvmsg`; only
-    /// observable through [`crate::cmsg_recvmsg`], see the type docs.
-    pub data_truncated: bool,
 }
 
 pub(crate) fn validate_stream_send(data: &[u8], fd_count: usize) -> io::Result<()> {
@@ -265,7 +262,6 @@ impl UnixStreamExt for UnixStream {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 
@@ -293,7 +289,6 @@ impl UnixStreamExt for UnixStream {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 
@@ -367,7 +362,6 @@ impl UnixDatagramExt for UnixDatagram {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 
@@ -395,7 +389,6 @@ impl UnixDatagramExt for UnixDatagram {
         Ok(ReceivedFds {
             data: data_buf,
             fds,
-            data_truncated: false,
         })
     }
 

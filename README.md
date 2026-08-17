@@ -120,8 +120,8 @@ let (n, fds) = rx.recv_fds_into::<4>(&mut buf).unwrap();
   inspect a truncated datagram instead of failing, use `cmsg_recvmsg` and
   read `RecvResult::data_truncated`.
 - **Stream callers needing boundaries** (which descriptors belong to which
-  message) should wait for the planned `FdChannel`, use a datagram socket,
-  or frame the stream themselves — a receive call may return bytes or
+  message) should use a datagram socket or frame the stream themselves — a
+  receive call may return bytes or
   descriptors from multiple sends, or only part of one send.
 
 ## Async (tokio)
