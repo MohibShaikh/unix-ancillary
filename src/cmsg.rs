@@ -7,7 +7,8 @@ use crate::platform;
 pub(crate) struct RecvMsgResult {
     pub bytes_read: usize,
     pub ancillary_len: usize,
-    pub truncated: bool,
+    pub ancillary_truncated: bool,
+    pub data_truncated: bool,
 }
 
 /// Send ordinary bytes without ancillary data, using the same signal-safe
@@ -87,7 +88,8 @@ pub(crate) fn recvmsg_vectored(
 
     #[allow(clippy::unnecessary_cast)]
     let ancillary_len = msg.msg_controllen as usize;
-    let truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
+    let ancillary_truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
+    let data_truncated = (msg.msg_flags & libc::MSG_TRUNC) != 0;
 
     // On non-CLOEXEC platforms, set the flag now. If this fails, the helper
     // closes every fd it found before returning the error.
@@ -96,6 +98,7 @@ pub(crate) fn recvmsg_vectored(
     Ok(RecvMsgResult {
         bytes_read: ret as usize,
         ancillary_len,
-        truncated,
+        ancillary_truncated,
+        data_truncated,
     })
 }

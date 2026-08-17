@@ -19,8 +19,8 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    recv_fds_into_impl, send_fds_impl, validate_stream_send, ReceivedFds, DEFAULT_DATAGRAM_BUF,
-    DEFAULT_STREAM_BUF,
+    recv_fds_into_impl, send_fds_impl, validate_stream_send, ReceivedFds, SocketKind,
+    DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
 
 /// Async fd passing on tokio's [`UnixStream`].
@@ -109,13 +109,14 @@ impl AsyncUnixStreamExt for UnixStream {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
         let (n, fds) = self
             .async_io(Interest::READABLE, || {
-                recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf)
+                recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Stream)
             })
             .await?;
         data_buf.truncate(n);
         Ok(ReceivedFds {
             data: data_buf,
             fds,
+            data_truncated: false,
         })
     }
 
@@ -124,7 +125,7 @@ impl AsyncUnixStreamExt for UnixStream {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl::<N>(self.as_fd(), &mut *data_buf)
+            recv_fds_into_impl::<N>(self.as_fd(), &mut *data_buf, SocketKind::Stream)
         })
         .await
     }
@@ -133,7 +134,10 @@ impl AsyncUnixStreamExt for UnixStream {
 /// Async fd passing on tokio's [`UnixDatagram`].
 ///
 /// The async analogue of [`UnixDatagramExt`](crate::UnixDatagramExt). The
-/// socket must be connected.
+/// socket must be connected. All convenience receive methods reject payload
+/// truncation with `InvalidData`; a caller who intends to inspect a truncated
+/// datagram must use [`crate::cmsg_recvmsg`] and read
+/// [`crate::RecvResult::data_truncated`].
 pub trait AsyncUnixDatagramExt {
     /// Send `data` plus borrowed fds. The socket must be connected.
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
@@ -162,13 +166,14 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
         let (n, fds) = self
             .async_io(Interest::READABLE, || {
-                recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf)
+                recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Datagram)
             })
             .await?;
         data_buf.truncate(n);
         Ok(ReceivedFds {
             data: data_buf,
             fds,
+            data_truncated: false,
         })
     }
 
@@ -177,7 +182,7 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl::<N>(self.as_fd(), &mut *data_buf)
+            recv_fds_into_impl::<N>(self.as_fd(), &mut *data_buf, SocketKind::Datagram)
         })
         .await
     }

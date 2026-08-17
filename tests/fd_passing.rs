@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::os::unix::io::{AsFd, AsRawFd};
-use std::os::unix::net::UnixStream;
-use unix_ancillary::{AncillaryData, SocketAncillary, UnixStreamExt};
+use std::os::unix::net::{UnixDatagram, UnixStream};
+use unix_ancillary::{AncillaryData, SocketAncillary, UnixDatagramExt, UnixStreamExt};
 
 #[test]
 fn send_recv_single_fd() {
@@ -181,4 +181,14 @@ fn send_fds_all_transfers_payload_and_descriptor() {
     }
     sender.join().unwrap();
     assert_eq!(received, vec![b'x'; 128 * 1024]);
+}
+
+#[test]
+fn datagram_payload_truncation_is_an_error() {
+    let (tx, rx) = UnixDatagram::pair().unwrap();
+    tx.send(b"payload-larger-than-buffer").unwrap();
+    let mut small = [0u8; 4];
+
+    let err = rx.recv_fds_into::<0>(&mut small).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }

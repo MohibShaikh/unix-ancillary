@@ -89,3 +89,13 @@ async fn async_send_fds_all_transfers_payload_and_descriptor() {
     sender.await.unwrap();
     assert_eq!(received, expected);
 }
+
+#[tokio::test]
+async fn async_datagram_payload_truncation_is_an_error() {
+    let (tx, rx) = UnixDatagram::pair().unwrap();
+    tx.send(b"payload-larger-than-buffer").await.unwrap();
+    let mut small = [0u8; 4];
+
+    let err = rx.recv_fds_into::<0>(&mut small).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}

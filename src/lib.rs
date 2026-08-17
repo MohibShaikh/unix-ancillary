@@ -95,11 +95,15 @@ use std::os::unix::io::BorrowedFd;
 
 /// Result returned by [`cmsg_recvmsg`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct RecvResult {
     /// Bytes written into the iov buffers.
     pub bytes_read: usize,
     /// `true` if `MSG_CTRUNC` was set on the underlying `recvmsg`.
     pub truncated: bool,
+    /// `true` if `MSG_TRUNC` was set: the datagram payload did not fit the
+    /// iov buffers and was truncated. Stream sockets never set this.
+    pub data_truncated: bool,
 }
 
 /// Send data with ancillary control messages over a Unix socket.
@@ -127,9 +131,10 @@ pub fn cmsg_recvmsg(
 ) -> io::Result<RecvResult> {
     let result = cmsg::recvmsg_vectored(fd, iov, ancillary.buffer)?;
     ancillary.length = result.ancillary_len;
-    ancillary.truncated = result.truncated;
+    ancillary.truncated = result.ancillary_truncated;
     Ok(RecvResult {
         bytes_read: result.bytes_read,
-        truncated: result.truncated,
+        truncated: result.ancillary_truncated,
+        data_truncated: result.data_truncated,
     })
 }

@@ -9,12 +9,25 @@ use crate::platform;
 pub(crate) const DEFAULT_STREAM_BUF: usize = 4096;
 pub(crate) const DEFAULT_DATAGRAM_BUF: usize = 65536;
 
+/// Whether the receive operation is a stream or a datagram. Datagrams reject
+/// payload truncation; streams report it but continue.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SocketKind {
+    Stream,
+    Datagram,
+}
+
 /// Result of a successful `recv_fds` call.
 ///
 /// Truncation is a hard error in the high-level API: if you observe a
 /// successful `Ok(ReceivedFds)`, every fd the kernel deposited has been
 /// accounted for. Surplus fds beyond the caller's requested `N` are closed
 /// automatically before this struct is returned.
+///
+/// `data_truncated` is always `false` on stream sockets. Datagram
+/// convenience methods reject payload truncation entirely, so a
+/// `data_truncated == true` value is only observable through
+/// [`crate::cmsg_recvmsg`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ReceivedFds {
@@ -23,6 +36,9 @@ pub struct ReceivedFds {
     /// File descriptors received, capped at `N`. Each `OwnedFd` is closed on
     /// drop.
     pub fds: Vec<OwnedFd>,
+    /// `true` if `MSG_TRUNC` was set on the underlying `recvmsg`; only
+    /// observable through [`crate::cmsg_recvmsg`], see the type docs.
+    pub data_truncated: bool,
 }
 
 pub(crate) fn validate_stream_send(data: &[u8], fd_count: usize) -> io::Result<()> {
@@ -67,6 +83,7 @@ pub(crate) fn send_fds_impl(
 pub(crate) fn recv_fds_into_impl<const N: usize>(
     fd: BorrowedFd<'_>,
     data_buf: &mut [u8],
+    kind: SocketKind,
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
     let cap = N.max(platform::max_recv_fds());
     let mut anc_buf = vec![0u8; SocketAncillary::buffer_size_for_rights(cap)];
@@ -77,7 +94,7 @@ pub(crate) fn recv_fds_into_impl<const N: usize>(
     let ancillary = SocketAncillary {
         buffer: &mut anc_buf,
         length: result.ancillary_len,
-        truncated: result.truncated,
+        truncated: result.ancillary_truncated,
     };
 
     // Wrap every fd the kernel handed us. Surplus past `N` are dropped at
@@ -89,7 +106,7 @@ pub(crate) fn recv_fds_into_impl<const N: usize>(
         }
     }
 
-    if result.truncated {
+    if result.ancillary_truncated {
         // Defensive path: should be unreachable because `cap` exceeds
         // every kernel's per-message fd limit. If we land here, fds may
         // have been deposited beyond our buffer (macOS) and we cannot
@@ -98,6 +115,18 @@ pub(crate) fn recv_fds_into_impl<const N: usize>(
         drop(all_fds);
         return Err(io::Error::other(
             "ancillary truncated despite oversized buffer; possible fd leak — abort the connection",
+        ));
+    }
+
+    if kind == SocketKind::Datagram && result.data_truncated {
+        // The datagram payload did not fit `data_buf`. Bytes and fds past
+        // this point are lost; closing the fds we did receive keeps the
+        // process state clean. `cmsg_recvmsg` is the only path that reports
+        // the flag instead of failing.
+        drop(all_fds);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "datagram payload truncated before it fit the receive buffer",
         ));
     }
 
@@ -179,11 +208,12 @@ impl UnixStreamExt for UnixStream {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        let (n, fds) = recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf)?;
+        let (n, fds) = recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Stream)?;
         data_buf.truncate(n);
         Ok(ReceivedFds {
             data: data_buf,
             fds,
+            data_truncated: false,
         })
     }
 
@@ -191,11 +221,16 @@ impl UnixStreamExt for UnixStream {
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl::<N>(self.as_fd(), data_buf)
+        recv_fds_into_impl::<N>(self.as_fd(), data_buf, SocketKind::Stream)
     }
 }
 
 /// Extension trait for `UnixDatagram` adding fd-passing convenience methods.
+///
+/// The socket must be connected. All convenience receive methods reject
+/// payload truncation with `InvalidData`; a caller who intends to inspect a
+/// truncated datagram must use [`crate::cmsg_recvmsg`] and read
+/// [`crate::RecvResult::data_truncated`].
 pub trait UnixDatagramExt {
     /// Send `data` plus borrowed fds. The socket must be connected.
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
@@ -223,11 +258,12 @@ impl UnixDatagramExt for UnixDatagram {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        let (n, fds) = recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf)?;
+        let (n, fds) = recv_fds_into_impl::<N>(self.as_fd(), &mut data_buf, SocketKind::Datagram)?;
         data_buf.truncate(n);
         Ok(ReceivedFds {
             data: data_buf,
             fds,
+            data_truncated: false,
         })
     }
 
@@ -235,6 +271,6 @@ impl UnixDatagramExt for UnixDatagram {
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl::<N>(self.as_fd(), data_buf)
+        recv_fds_into_impl::<N>(self.as_fd(), data_buf, SocketKind::Datagram)
     }
 }
