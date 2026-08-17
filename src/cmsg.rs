@@ -31,11 +31,18 @@ pub(crate) fn sendmsg_vectored(
 
     // SAFETY: msghdr fully populated; iov and ancillary_buf borrowed for the
     // syscall duration; fd is a valid descriptor.
-    let ret = unsafe { libc::sendmsg(fd.as_raw_fd(), &msg, 0) };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(ret as usize)
+    platform::prepare_send(fd.as_raw_fd())?;
+    loop {
+        // SAFETY: same justification as above; SEND_FLAGS is defined by
+        // platform.rs for every target.
+        let ret = unsafe { libc::sendmsg(fd.as_raw_fd(), &msg, platform::SEND_FLAGS) };
+        if ret >= 0 {
+            return Ok(ret as usize);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
     }
 }
 
@@ -58,10 +65,18 @@ pub(crate) fn recvmsg_vectored(
 
     // SAFETY: msghdr fully populated; ancillary_buf borrowed mutably for the
     // syscall duration; fd is a valid descriptor.
-    let ret = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, platform::RECV_FLAGS) };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let ret = loop {
+        let ret = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, platform::RECV_FLAGS) };
+        if ret >= 0 {
+            break ret;
+        }
+        let err = io::Error::last_os_error();
+        // Retry interrupted syscalls, but surface `WouldBlock` unchanged so
+        // readiness adapters can retry when the socket becomes ready.
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    };
 
     #[allow(clippy::unnecessary_cast)]
     let ancillary_len = msg.msg_controllen as usize;

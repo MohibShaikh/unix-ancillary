@@ -135,3 +135,29 @@ fn stream_allows_empty_payload_without_fds() {
     let empty: &[std::fs::File] = &[];
     assert_eq!(tx.send_fds(b"", empty).unwrap(), 0);
 }
+
+#[test]
+fn send_to_closed_peer_returns_error_without_sigpipe() {
+    if std::env::var_os("UNIX_ANCILLARY_SIGPIPE_CHILD").is_some() {
+        // Undo the runtime's SIG_IGN so an unprotected send really dies.
+        // SAFETY: SIG_DFL is a valid disposition for SIGPIPE.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
+        let (tx, rx) = UnixStream::pair().unwrap();
+        drop(rx);
+        let file = tempfile::tempfile().unwrap();
+        let err = tx.send_fds(b"x", &[&file]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+        return;
+    }
+
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("send_to_closed_peer_returns_error_without_sigpipe")
+        .arg("--nocapture")
+        .env("UNIX_ANCILLARY_SIGPIPE_CHILD", "1")
+        .status()
+        .unwrap();
+
+    assert!(status.success(), "child terminated with {status}");
+}
