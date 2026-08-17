@@ -121,6 +121,15 @@ pub trait UnixStreamExt {
     /// Sending one or more descriptors requires at least one payload byte.
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
 
+    /// Send `data` plus borrowed file descriptors, completing the payload
+    /// even if the initial send accepts only part of it.
+    ///
+    /// The descriptors are attached to the first successful send and never
+    /// retransmitted. The remaining payload bytes are written with ordinary
+    /// signal-safe sends. Returns `WriteZero` if the socket accepts no
+    /// progress.
+    fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()>;
+
     /// Receive data and up to `N` file descriptors.
     ///
     /// Allocates an internal 4 KiB data buffer plus an oversized cmsg buffer
@@ -141,6 +150,31 @@ impl UnixStreamExt for UnixStream {
         validate_stream_send(data, fds.len())?;
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         send_fds_impl(self.as_fd(), data, &borrowed)
+    }
+
+    fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()> {
+        validate_stream_send(data, fds.len())?;
+        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
+        let mut sent = if borrowed.is_empty() {
+            0
+        } else {
+            let first = send_fds_impl(self.as_fd(), data, &borrowed)?;
+            if first == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to send fd payload byte",
+                ));
+            }
+            first
+        };
+        while sent < data.len() {
+            let n = cmsg::send_bytes(self.as_fd(), &data[sent..])?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "short write"));
+            }
+            sent += n;
+        }
+        Ok(())
     }
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {

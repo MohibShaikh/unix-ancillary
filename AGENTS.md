@@ -31,6 +31,7 @@ Never mark work complete here without recording the exact verification command a
 - Current phase: Phase 2, core correctness hardening Task 2
 - Phase 2 Task 1 completed on 2026-08-17 on branch `feat/phase2-core-hardening` (a new branch carrying the reviewed plan edits; the planning commit `1d75576` is its base). Red state observed first: both new tests failed with `unwrap_err()` on `Ok(0)`; after `validate_stream_send` in `src/ext.rs` and calls in `UnixStreamExt::send_fds` and `AsyncUnixStreamExt::send_fds`, `cargo test --test fd_passing` (9 tests) and `cargo test --all-features --test async_fd` (4 tests) pass in Docker on Rust 1.97.1.
 - Phase 2 Task 2 completed on 2026-08-17. The SIGPIPE subprocess regression test went red first with `child terminated with signal: 13 (SIGPIPE)`. Added `SEND_FLAGS` (`MSG_NOSIGNAL` for the CLOEXEC six, `SO_NOSIGPIPE` via `prepare_send` on Apple, documented `0` fallback for unknown Unix) in `src/platform.rs` and EINTR retry loops in both `sendmsg_vectored` and `recvmsg_vectored` in `src/cmsg.rs`. The regression test, full default suite (10 fd_passing tests), all-feature suite, clippy `-D warnings`, and fmt all pass in Docker on Rust 1.97.1.
+- Phase 2 Task 3 completed on 2026-08-17. Added `send_fds_all` to `UnixStreamExt` and `AsyncUnixStreamExt`. Tests went red first on compile (`no method named send_fds_all`). Added `cmsg::send_bytes` and used it (not `Write::write_all`) for the tail so `MSG_NOSIGNAL` covers the whole payload. tokio dev-deps gained `io-util` for `AsyncReadExt` in the round-trip test. Blocking and Tokio round-trip tests pass (payload 128 KiB + one descriptor, exactly one descriptor delivered), full default and all-feature suites pass, clippy and fmt clean in Docker on Rust 1.97.1.
 - Baseline Docker status: complete on Rust 1.97.1; build, tests, doctests, rustdoc, Clippy, fmt, and all four public examples pass
 - Last updated: 2026-08-17 UTC
 
@@ -175,7 +176,8 @@ Do not create these files blindly. Follow the committed implementation plan and 
 - [x] Commit the handoff, design, and plans as `1d75576`.
 - [x] Phase 2 Task 1: enforce the Unix stream fd payload contract (`fix: enforce Unix stream fd payload contract`).
 - [x] Phase 2 Task 2: SIGPIPE-safe and EINTR-resilient syscalls (`fix: make ancillary sends signal-safe and EINTR-resilient`).
-- [ ] Phase 2 Task 3: descriptor-once complete stream sends.
+- [x] Phase 2 Task 3: descriptor-once complete stream sends (`feat: add descriptor-once complete stream sends`).
+- [ ] Phase 2 Task 4: surface datagram payload truncation.
 
 ## Known correctness gaps to address
 

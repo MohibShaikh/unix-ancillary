@@ -10,6 +10,13 @@ pub(crate) struct RecvMsgResult {
     pub truncated: bool,
 }
 
+/// Send ordinary bytes without ancillary data, using the same signal-safe
+/// flags and EINTR behavior as descriptor sends.
+pub(crate) fn send_bytes(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
+    let iov = [io::IoSlice::new(data)];
+    sendmsg_vectored(fd, &iov, &[], 0)
+}
+
 /// Send data and ancillary control messages over a Unix socket.
 pub(crate) fn sendmsg_vectored(
     fd: BorrowedFd<'_>,

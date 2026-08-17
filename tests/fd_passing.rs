@@ -161,3 +161,24 @@ fn send_to_closed_peer_returns_error_without_sigpipe() {
 
     assert!(status.success(), "child terminated with {status}");
 }
+
+#[test]
+fn send_fds_all_transfers_payload_and_descriptor() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    let payload = vec![b'x'; 128 * 1024];
+
+    let sender = std::thread::spawn(move || tx.send_fds_all(&payload, &[&file]).unwrap());
+
+    let first = rx.recv_fds::<1>().unwrap();
+    assert_eq!(first.fds.len(), 1);
+    let mut received = first.data;
+    while received.len() < 128 * 1024 {
+        let mut buf = [0u8; 8192];
+        let n = std::io::Read::read(&mut &rx, &mut buf).unwrap();
+        assert_ne!(n, 0);
+        received.extend_from_slice(&buf[..n]);
+    }
+    sender.join().unwrap();
+    assert_eq!(received, vec![b'x'; 128 * 1024]);
+}

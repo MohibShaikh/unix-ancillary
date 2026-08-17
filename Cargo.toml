@@ -21,7 +21,7 @@ tokio = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", default-features = false, features = ["net", "rt", "macros"] }
+tokio = { version = "1", default-features = false, features = ["net", "rt", "macros", "io-util"] }
 
 [package.metadata.docs.rs]
 all-features = true
