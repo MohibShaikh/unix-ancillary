@@ -67,6 +67,13 @@ This crate is the stable, safe-by-default middle.
 
 ## Quick Start
 
+```toml
+[dependencies]
+unix-ancillary = "0.4"
+```
+
+Default build pulls in `libc` and nothing else.
+
 ```rust
 use std::os::unix::net::UnixStream;
 use unix_ancillary::UnixStreamExt;
