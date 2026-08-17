@@ -31,17 +31,20 @@
    - Plan: `docs/superpowers/plans/2026-08-17-core-correctness-hardening.md`
    - Exit: empty payloads, SIGPIPE, EINTR, partial sends, truncation, and exact FD counts are explicit and tested.
 
-3. **Phase 3: power-user low-level APIs**
-   - Planned scope: reusable receive storage, peer credentials, unconnected datagrams, runtime-neutral internals.
+3. **Phase 3: peer credentials and shared internals**
+   - Planned scope: `SO_PEERCRED` and its per-platform equivalents, runtime-neutral `BorrowedFd` internals shared by both adapters.
+   - Cut from the original scope: reusable receive storage (`rustix` has it) and unconnected datagram addressing (`uds` has it). See the Prior art section of the spec.
    - Write the detailed phase plan after Phase 2 public types and signatures are verified.
 
-4. **Phase 4: authenticated `FdChannel`**
-   - Planned scope: protocol codec, blocking channel, Tokio channel, peer policy, optional serialization, spawn helpers, sequenced-packet evaluation.
-   - Write the detailed phase plan after Phase 3 confirms the reusable and credential interfaces consumed by the channel.
+4. **Phase 4: adoption and release readiness**
+   - Planned scope: real multiprocess examples, the `sendfd` comparison and migration guide, security and platform documents, expanded CI, semver and fuzz checks, release notes.
+   - Moved ahead of the channel. Measured on 2026-08-17, `sendfd` earns 2.3M downloads per 90 days from 13 dependents while `fd-queue` ships comparable features to 1 dependent and 143 downloads. Surface does not drive adoption; dependents do.
+   - Exit: one real downstream user, or a documented decision to stop here.
 
-5. **Phase 5: adoption and release readiness**
-   - Planned scope: real multiprocess examples, benchmarks, security and migration documents, expanded CI, semver and fuzz checks, release notes.
-   - Write the detailed phase plan against the completed public API.
+5. **Phase 5: authenticated `FdChannel`, if demanded**
+   - Planned scope: protocol codec, blocking channel, Tokio channel, peer policy, optional serialization.
+   - Blocked on a named downstream request. `ipc-channel` already covers framed messages with descriptors and serde at 54 dependents.
+   - Cut from the original scope: spawn helpers (`command-fds`) and the seqpacket transport (`tokio-seqpacket`, `uds`).
 
 ## Phase transition gate
 

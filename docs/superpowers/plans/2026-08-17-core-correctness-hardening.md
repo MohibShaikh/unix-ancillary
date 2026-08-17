@@ -149,17 +149,25 @@ git commit -m "fix: enforce Unix stream fd payload contract"
 
 - [ ] **Step 1: Add a disconnected-peer subprocess regression test**
 
-Add a helper test executable branch inside `tests/fd_passing.rs` driven by an environment variable:
+Add a helper test executable branch inside `tests/fd_passing.rs` driven by an environment variable.
+
+The `SIG_DFL` reset is load-bearing. Rust's runtime sets `SIGPIPE` to `SIG_IGN` during startup, test binaries included, so an unprotected `sendmsg` already returns `EPIPE` instead of killing the process. Without restoring the default disposition this test passes identically before and after the fix and proves nothing.
+
+`libc` is a normal dependency and is already usable from integration tests (see `tests/fd_passing.rs:57`).
 
 ```rust
 #[test]
 fn send_to_closed_peer_returns_error_without_sigpipe() {
     if std::env::var_os("UNIX_ANCILLARY_SIGPIPE_CHILD").is_some() {
+        // Undo the runtime's SIG_IGN so an unprotected send really dies.
+        // SAFETY: SIG_DFL is a valid disposition for SIGPIPE.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+
         let (tx, rx) = UnixStream::pair().unwrap();
         drop(rx);
         let file = tempfile::tempfile().unwrap();
-        let result = tx.send_fds(b"x", &[&file]);
-        assert!(result.is_err());
+        let err = tx.send_fds(b"x", &[&file]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
         return;
     }
 
@@ -183,11 +191,11 @@ Run:
 cargo test --test fd_passing send_to_closed_peer_returns_error_without_sigpipe -- --nocapture
 ```
 
-Expected: on Linux, the child may terminate with `SIGPIPE`, proving the unsafe process behavior.
+Expected: the child dies on signal 13 and the parent's `status.success()` assertion fails. That is the red state, and it is only reachable because of the `SIG_DFL` reset in Step 1.
 
 - [ ] **Step 3: Add platform send preparation**
 
-In `src/platform.rs`, expose:
+Both items go inside the `mod inner` blocks at `src/platform.rs:162` and `src/platform.rs:194`, not at file scope, so the existing `pub(crate) use inner::*;` keeps exporting them:
 
 ```rust
 pub(crate) const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
@@ -197,9 +205,11 @@ pub(crate) fn prepare_send(_fd: RawFd) -> io::Result<()> {
 }
 ```
 
-Use the constant only under targets where `MSG_NOSIGNAL` is available. On Apple targets, define `SEND_FLAGS` as `0` and implement `prepare_send` with `setsockopt(SOL_SOCKET, SO_NOSIGPIPE, 1)`.
+Do not reuse the existing `cfg` list verbatim. It encodes `MSG_CMSG_CLOEXEC` support, which is a different platform fact that merely happens to cover the same six targets today. Write a separate list for `MSG_NOSIGNAL` and confirm the constant exists for each target in the `libc` version pinned in `Cargo.lock` before adding it.
 
-Keep every `cfg` branch explicit for Linux, Android, macOS, FreeBSD, OpenBSD, NetBSD, and DragonFly. Unsupported Unix targets must fail compilation with an actionable message rather than silently using unsafe flags.
+Add an explicit Apple branch: `SEND_FLAGS = 0` plus `prepare_send` calling `setsockopt(SOL_SOCKET, SO_NOSIGPIPE, 1)`. This costs one extra syscall per send because the extension traits hold no per-socket state. Accept that for now and record it; `FdChannel` owns its socket and can hoist it to construction later.
+
+Unknown Unix targets fall back to `SEND_FLAGS = 0` with a documented caveat in the platform support notes. Do not `compile_error!` on them. Today every Unix target builds through the fallback path at `src/platform.rs:186`; a hard failure would newly break illumos, Solaris, and AIX for a signal caveat rather than a soundness bug.
 
 - [ ] **Step 4: Retry interrupted syscalls**
 
@@ -336,22 +346,38 @@ Implementation:
 
 ```rust
 validate_stream_send(data, fds.len())?;
-if fds.is_empty() {
-    return (&self).write_all(data);
-}
 let borrowed: Vec<_> = fds.iter().map(|fd| fd.as_fd()).collect();
-let first = send_fds_impl(self.as_fd(), data, &borrowed)?;
-if first == 0 {
-    return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to send fd payload byte"));
+let mut sent = if borrowed.is_empty() {
+    0
+} else {
+    let first = send_fds_impl(self.as_fd(), data, &borrowed)?;
+    if first == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "failed to send fd payload byte",
+        ));
+    }
+    first
+};
+while sent < data.len() {
+    let n = cmsg::send_bytes(self.as_fd(), &data[sent..])?;
+    if n == 0 {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "short write"));
+    }
+    sent += n;
 }
-(&self).write_all(&data[first..])
+Ok(())
 ```
 
-Import `std::io::Write`.
+Finish the payload with the `send_bytes` helper from Step 4, not `Write::write_all`. `write_all` calls `write(2)`, which carries no `MSG_NOSIGNAL`, so it would leave the descriptor-bearing head signal-safe and the ordinary tail unprotected on exactly the process that restored the default `SIGPIPE` handler.
+
+Two things the obvious spelling gets wrong: `(&self).write_all(..)` does not compile because `Write` needs a mutable place, and returning early on `fds.is_empty()` skips the same retry loop the descriptor path needs.
 
 - [ ] **Step 6: Implement Tokio `send_fds_all`**
 
-Add the async method. Perform the initial ancillary send through `async_io`. Then loop over the remaining bytes with `self.writable().await?` and `self.try_write(&remaining)`, retrying `WouldBlock`, and return `WriteZero` for zero progress.
+Add the async method. Perform the initial ancillary send through `async_io`. Then loop over the remaining bytes with `self.writable().await?` and an `async_io(Interest::WRITABLE, || cmsg::send_bytes(..))` call, retrying `WouldBlock`, and return `WriteZero` for zero progress.
+
+Do not use `try_write` for the tail. It is `write(2)` and reintroduces the unprotected-`SIGPIPE` gap that Step 5 closes on the blocking path.
 
 Document that cancellation after the initial send may transfer descriptors and a payload prefix. `FdChannel` will later own resumable frame state.
 
@@ -388,6 +414,8 @@ git commit -m "feat: add descriptor-once complete stream sends"
 - Produces: internal separate ancillary and data truncation flags, plus `ReceivedFds::data_truncated`. Convenience datagram methods return `InvalidData` on payload truncation.
 
 - [ ] **Step 1: Add failing datagram truncation test**
+
+`tests/fd_passing.rs:1-4` imports only `UnixStream` and `UnixStreamExt`. Add `std::os::unix::net::UnixDatagram` and `unix_ancillary::UnixDatagramExt` before pasting this and the Task 5 datagram cases.
 
 ```rust
 #[test]
@@ -447,6 +475,12 @@ pub struct RecvResult {
 }
 ```
 
+This is a source break, not an additive change, and the plan's global constraints do not cover it. `RecvResult` at `src/lib.rs:89` is a plain public struct: adding a field breaks downstream struct literals and exhaustive destructuring, and adding `#[non_exhaustive]` breaks them again. Take it deliberately:
+
+- Bump the crate to `0.4.0` in this phase rather than at release time.
+- Record it in `CHANGELOG.md` (created in Task 6, not deferred to Phase 5).
+- Note the exception in `AGENTS.md` against the "existing signatures remain available" constraint, which covers method signatures, not struct shape.
+
 Update crate docs and tests that construct or inspect it.
 
 Add `pub data_truncated: bool` to the already `#[non_exhaustive]` `ReceivedFds`.
@@ -454,6 +488,8 @@ Add `pub data_truncated: bool` to the already `#[non_exhaustive]` `ReceivedFds`.
 - [ ] **Step 5: Make convenience datagram receives strict**
 
 Pass a socket-kind parameter into the shared receive implementation. Stream calls ignore `data_truncated`. Datagram calls drop all received descriptors and return `InvalidData` when `data_truncated` is true.
+
+`recv_fds_into` returns `(usize, Vec<OwnedFd>)` and has nowhere to report the flag, so making it strict leaves `cmsg_recvmsg` as the only path for a caller who intends to inspect a truncated datagram. Say that explicitly in the rustdoc for both datagram traits. It contradicts the spec line "lower-level methods may return the flag", so amend the spec in the same commit rather than leaving the two documents disagreeing.
 
 - [ ] **Step 6: Run targeted and full tests**
 
@@ -571,6 +607,10 @@ async fn async_recv_exact_rejects_too_many() {
 
 In the isolated `fd_leak` test binary, count open descriptors, send three descriptors, call `recv_fds_exact::<1>`, assert an error, drop all endpoints, and assert the descriptor count returns to baseline.
 
+Take the baseline before creating the socket pair and the temp files, otherwise the assertion passes even if the strict path leaks. Follow the counting approach already in `tests/fd_leak.rs:11`.
+
+Also add one datagram exact-count case. Step 5 puts `recv_fds_exact` on both traits and the stream cases alone will not catch a datagram wiring mistake.
+
 - [ ] **Step 3: Run and verify compile failure**
 
 Expected: exact APIs do not exist.
@@ -586,6 +626,8 @@ pub(crate) enum CountMode {
 ```
 
 Collect every descriptor first. In exact mode, compare `all_fds.len()` before returning any descriptor. On mismatch, drop the vector and return `InvalidData` with expected and observed counts.
+
+The spec describes a public `FdCount { UpTo, Exact }` enum instead. This plan keeps the count mode internal and exposes const-generic `recv_fds_exact::<N>`, which is the smaller surface. Amend the spec to match so Phase 3 and Phase 4 are not written against an enum that never ships.
 
 - [ ] **Step 5: Add blocking trait methods**
 
@@ -632,6 +674,8 @@ git commit -m "feat: add strict descriptor-count receive APIs"
 - Modify: `src/lib.rs`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `AGENTS.md`
+- Modify: `Cargo.toml` (version to `0.4.0`)
+- Create: `CHANGELOG.md`
 
 **Interfaces:**
 - Consumes: every new Phase 2 API and behavior.
@@ -660,6 +704,10 @@ Under the existing test job, retain the full suite and add these commands after 
 ```
 
 These steps make the security regressions visible without replacing the full suite.
+
+Also add `cargo test` to the `msrv` job. It currently runs `cargo build --verbose` only (`.github/workflows/ci.yml:33-39`), so Step 4's local 1.75 test run is not enforced anywhere.
+
+Create `CHANGELOG.md` in this task. Phase 2 lands three behavior breaks (stream empty-payload rejection, datagram truncation errors, `RecvResult` shape) and Phase 5 is too late to start recording them.
 
 - [ ] **Step 3: Run the canonical stable acceptance workflow**
 
@@ -693,7 +741,7 @@ Confirm existing methods remain and new behavior is documented.
 Record exact command results and the next phase entry point.
 
 ```bash
-git add AGENTS.md README.md src/lib.rs .github/workflows/ci.yml
+git add AGENTS.md README.md CHANGELOG.md Cargo.toml src/lib.rs .github/workflows/ci.yml
 git commit -m "docs: complete core hardening guidance and verification"
 ```
 

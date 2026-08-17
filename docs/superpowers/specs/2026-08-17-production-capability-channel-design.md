@@ -38,6 +38,36 @@ The crate will not become a general Unix syscall library. `nix`, `rustix`, and `
 4. Treating `SOCK_STREAM` as message-oriented without framing.
 5. Adding serialization to the default feature set.
 6. Adding a full RPC framework, service registry, or authorization language.
+7. Reimplementing anything already shipped and maintained on crates.io. See the prior art below.
+
+## Prior art
+
+Measured from the crates.io API on 2026-08-17. Reverse dependency counts are direct dependents only.
+
+| crate | downloads / 90d | total | direct dependents |
+| --- | --- | --- | --- |
+| `sendfd` | 2,285,277 | 14,602,489 | 13 |
+| `uds` | 1,359,468 | 9,379,285 | 10 |
+| `command-fds` | 1,311,514 | 3,877,455 | - |
+| `tokio-seqpacket` | 1,151,953 | 4,178,002 | - |
+| `ipc-channel` | 804,818 | 5,787,918 | 54 |
+| `passfd` | 63,108 | 522,801 | 5 |
+| `fd-queue` | 143 | 14,125 | 1 |
+| `unix-ancillary` | 246 | 298 | 0 |
+
+Downloads track dependents, not features. `sendfd` earns 2.3M every 90 days from 13 dependents. `fd-queue` is a released, feature-complete fd-passing crate with one dependent and 143 downloads. Shipping more surface does not change this number; being depended on does.
+
+What the ecosystem already covers, verified against docs.rs rather than recalled:
+
+- `uds::UnixDatagramExt` ships `send_fds`, `recv_fds`, `send_fds_to`, `recv_fds_from`, `initial_pair_credentials`, abstract addresses, and seqpacket sockets.
+- `rustix::net::RecvAncillaryBuffer` and `SendAncillaryBuffer` are reusable ancillary storage.
+- `command-fds` passes arbitrary descriptors to child processes at chosen numbers.
+- `tokio-seqpacket` provides seqpacket transport with ancillary support.
+- `ipc-channel` provides bounded framed messages with attached descriptors, serde payloads, and spawn bootstrap.
+
+What none of them do, and what this crate exists for: sizing the receive control buffer past every kernel's per-message descriptor cap so `MSG_CTRUNC` cannot strand descriptors, strict descriptor counts, and descriptor-once complete sends. That is a correctness argument against `sendfd`, which is the crate people already reach for. It is the whole pitch and it is Layer 1 and Layer 2.
+
+Any item below that duplicates the table above must justify itself against a named downstream request before it is built.
 
 ## Constraints
 
@@ -131,16 +161,9 @@ The Tokio form uses an explicit progress object or internal state machine so can
 
 ### Count policy
 
-Strict and permissive receive modes are separate:
+Strict and permissive receive modes are separate. The mode is an internal `CountMode`; the public surface is const-generic `recv_fds::<N>` for permissive and `recv_fds_exact::<N>` for strict. No public `FdCount` enum ships, because it would add a type without adding a capability.
 
-```rust
-pub enum FdCount {
-    UpTo(usize),
-    Exact(usize),
-}
-```
-
-Const-generic convenience methods remain available. Strict mode errors if the peer sends fewer or more descriptors than expected. Surplus descriptors are still closed before returning the error.
+Strict mode errors if the peer sends fewer or more descriptors than expected. Surplus descriptors are still closed before returning the error.
 
 ### Receive outcome
 
@@ -154,22 +177,13 @@ pub struct ReceivedFds {
 }
 ```
 
-Ancillary truncation remains a hard error because returning incomplete descriptor state is unsafe. Datagram data truncation is also a hard error in convenience methods. Lower-level methods may return the flag for callers that intentionally inspect truncated datagrams.
+Ancillary truncation remains a hard error because returning incomplete descriptor state is unsafe. Datagram data truncation is also a hard error in every extension-trait method, including `recv_fds_into`, whose `(usize, Vec<OwnedFd>)` return has nowhere to carry the flag. A caller who intends to inspect a truncated datagram uses `cmsg_recvmsg` and reads `RecvResult::data_truncated`. That is the only lenient path and the trait docs must say so.
 
 ### Reusable buffers
 
-A dedicated reusable receive object owns both data and ancillary storage:
+Cut. `rustix::net::RecvAncillaryBuffer` and `SendAncillaryBuffer` already are this, maintained, and on 233M downloads per 90 days. A caller who profiles allocation out of their receive path should reach for rustix, and the README comparison should say so.
 
-```rust
-pub struct FdRecvBuffer {
-    data: Vec<u8>,
-    ancillary: Vec<u8>,
-}
-```
-
-It supports configurable payload and descriptor capacities and can be cleared without releasing allocation. The existing allocation-based convenience APIs delegate to it.
-
-A corresponding send buffer is added only if benchmarks show meaningful benefit beyond borrowing caller data and reusing ancillary storage. YAGNI applies.
+Revisit only if a named user reports that the per-call `Vec` allocation in `recv_fds_into_impl` is measurably their bottleneck and they cannot take a rustix dependency.
 
 ### Peer credentials
 
@@ -186,9 +200,11 @@ pub struct PeerCredentials {
 
 Linux and Android use `SO_PEERCRED`. BSD and macOS use their available peer credential APIs. Unsupported fields are `None`, not invented values. The API distinguishes credentials established by the connected socket from credentials carried in a message.
 
+Kept despite `uds::initial_pair_credentials` and `tokio::net::UnixStream::peer_cred` existing. It is roughly thirty lines of `getsockopt`, tokio's version does not help blocking callers, and taking a `uds` dependency to get it would break the libc-only default and pull in a second fd-passing implementation. This is the one duplication the crate absorbs rather than delegates.
+
 ### Datagram addressing
 
-Unconnected datagram support adds explicit `send_fds_to` and `recv_fds_from` operations. Address parsing uses standard-library Unix socket address types where possible and keeps raw `sockaddr_un` handling internal.
+Cut. `uds::UnixDatagramExt` already ships `send_fds_to` and `recv_fds_from` along with abstract address support, and does the `sockaddr_un` work that this crate would be duplicating byte for byte. Point at it from the README instead.
 
 ### Runtime-neutral nonblocking core
 
@@ -202,11 +218,13 @@ Additional runtime adapters are separate optional modules or companion crates on
 
 `FdChannel` provides the abstraction repeatedly implemented by sandbox runtimes, capability brokers, plugin hosts, and privilege-separated daemons: bounded framed messages with attached owned capabilities and verified peer identity.
 
+Gated on demand. `ipc-channel` already occupies this space with 54 direct dependents and seven years of production use, so a second framed-messages-plus-descriptors crate needs a reason to exist beyond being newer. The credible one is that `ipc-channel` is a channel abstraction with serde at its centre while this would be a byte-and-descriptor frame with no required serialization and explicit peer policy. That is a thin difference. Do not start Layer 3 until Layer 1 and Layer 2 have shipped and at least one downstream user has asked for framing. If nobody asks, the crate is finished at Layer 2 and that is a good outcome.
+
 ### Transport
 
 The first implementation uses connected Unix streams because standard-library and Tokio support is mature and portable. Frame boundaries are implemented in user space.
 
-`SOCK_SEQPACKET` is evaluated after the framed stream implementation is stable. It may be offered as a transport adapter rather than becoming a prerequisite.
+`SOCK_SEQPACKET` is not implemented here. `tokio-seqpacket` and `uds` already provide seqpacket sockets with ancillary support; if framing over seqpacket is wanted, `FdChannel` should be generic enough to sit on top of one of them.
 
 ### Wire format
 
@@ -291,7 +309,7 @@ An optional `serde` feature provides convenience methods that serialize payloads
 
 ### Child process establishment
 
-Helpers create a Unix socket pair, preserve one endpoint across spawn using an explicit inherited descriptor, and return the parent channel. The API documents the required child-side descriptor number or environment variable. It does not perform privilege dropping or sandbox setup itself.
+Cut. `command-fds` already passes arbitrary descriptors to a child at chosen numbers, at 1.3M downloads per 90 days. The documentation shows the socketpair-plus-`command-fds` recipe in an example; the crate does not wrap it.
 
 ## Errors
 
@@ -402,17 +420,19 @@ Establish Docker verification, `AGENTS.md`, this design, phase plans, and clean 
 
 Implement empty-payload enforcement, stream documentation, SIGPIPE-safe flags, EINTR handling, descriptor-once complete sends, separate truncation metadata, and exact count policies.
 
-### Phase 3: power-user APIs
+### Phase 3: peer credentials and shared internals
 
-Implement reusable buffers, peer credentials, unconnected datagram addressing, and internal `BorrowedFd` operations shared by adapters.
+Implement peer credentials and the internal `BorrowedFd` operations shared by both adapters. Reusable buffers and unconnected datagram addressing are cut; see Prior art.
 
-### Phase 4: capability channel
+### Phase 4: adoption and release readiness
 
-Implement the frame protocol, blocking channel, Tokio channel, peer policies, optional serialization, spawn helpers, and sequenced-packet evaluation.
+Real multiprocess examples, the `sendfd` comparison and migration guide, security and platform documents, expanded CI, semver and fuzz checks, release notes. Moved ahead of the channel because it is the only phase that can produce a dependent, and dependents are what the download numbers actually track.
 
-### Phase 5: adoption and release readiness
+The specific goal is one real downstream user. Until that exists, further API surface is speculative.
 
-Implement real multiprocess examples, benchmarks, security and migration documents, expanded CI, final acceptance verification, and release notes.
+### Phase 5: capability channel, if demanded
+
+Frame protocol, blocking channel, Tokio channel, peer policies, optional serialization. Start only against a named request. See the gating note under Layer 3.
 
 ## Compatibility strategy
 
