@@ -1,6 +1,6 @@
 [package]
 name = "unix-ancillary"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS fd passing) with OwnedFd/BorrowedFd"
@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/MohibShaikh/unix-ancillary"
 keywords = ["unix", "socket", "fd-passing", "ancillary", "scm-rights"]
 categories = ["os::unix-apis", "network-programming"]
-exclude = ["/fuzz", "/target", "/.github"]
+exclude = ["/fuzz", "/target", "/.github", "/docs", "/AGENTS.md"]
 
 [dependencies]
 libc = "0.2"
@@ -21,7 +21,7 @@ tokio = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", default-features = false, features = ["net", "rt", "macros"] }
+tokio = { version = "1", default-features = false, features = ["net", "rt", "macros", "io-util"] }
 
 [package.metadata.docs.rs]
 all-features = true
