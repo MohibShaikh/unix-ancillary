@@ -15,6 +15,10 @@ impl fmt::Display for AncillaryError {
 impl std::error::Error for AncillaryError {}
 
 /// Received ancillary data from a Unix socket.
+///
+/// Non-exhaustive: matching must carry a wildcard arm. Future control-message
+/// kinds are added here, and marking it now keeps that additive.
+#[non_exhaustive]
 pub enum AncillaryData<'a> {
     /// File descriptors received via `SCM_RIGHTS`.
     ScmRights(ScmRights<'a>),

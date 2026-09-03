@@ -19,7 +19,8 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    recv_fds_into_impl, send_fds_impl, validate_stream_send, CountMode, ReceivedFds, SocketKind,
+    iov_len, recv_fds_into_impl, recv_fds_into_vectored_impl, send_fds_impl,
+    send_fds_vectored_impl, validate_stream_send, CountMode, ReceivedFds, SocketKind,
     DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
 
@@ -37,6 +38,24 @@ pub trait AsyncUnixStreamExt {
     ///
     /// Sending one or more descriptors requires at least one payload byte.
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
+
+    /// Vectored analogue of [`send_fds`](Self::send_fds).
+    ///
+    /// There is no `send_fds_vectored_all`. This is one `sendmsg`, so on a
+    /// stream it can accept only part of the payload while still delivering
+    /// every descriptor. Use [`send_fds_all`](Self::send_fds_all) with a
+    /// single contiguous buffer when you need the completion loop.
+    async fn send_fds_vectored(
+        &self,
+        iov: &[io::IoSlice<'_>],
+        fds: &[impl AsFd],
+    ) -> io::Result<usize>;
+
+    /// Vectored analogue of `recv_fds_into`, capping fds at `N`.
+    async fn recv_fds_vectored<const N: usize>(
+        &self,
+        iov: &mut [io::IoSliceMut<'_>],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
 
     /// Send `data` plus borrowed file descriptors, completing the payload
     /// even if the initial send accepts only part of it.
@@ -77,6 +96,40 @@ pub trait AsyncUnixStreamExt {
 }
 
 impl AsyncUnixStreamExt for UnixStream {
+    async fn send_fds_vectored(
+        &self,
+        iov: &[io::IoSlice<'_>],
+        fds: &[impl AsFd],
+    ) -> io::Result<usize> {
+        if !fds.is_empty() && iov_len(iov) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SCM_RIGHTS over a Unix stream requires at least one payload byte",
+            ));
+        }
+        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
+        self.async_io(Interest::WRITABLE, || {
+            send_fds_vectored_impl(self.as_fd(), iov, &borrowed)
+        })
+        .await
+    }
+
+    async fn recv_fds_vectored<const N: usize>(
+        &self,
+        iov: &mut [io::IoSliceMut<'_>],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        let iov = std::cell::RefCell::new(iov);
+        self.async_io(Interest::READABLE, || {
+            recv_fds_into_vectored_impl(
+                self.as_fd(),
+                &mut iov.borrow_mut()[..],
+                SocketKind::Stream,
+                CountMode::UpTo(N),
+            )
+        })
+        .await
+    }
+
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
         validate_stream_send(data, fds.len())?;
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();

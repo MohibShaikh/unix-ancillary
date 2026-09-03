@@ -8,17 +8,17 @@ Safe, ergonomic Unix socket ancillary data (SCM_RIGHTS file descriptor passing) 
 
 ## Features
 
-- **Safe `OwnedFd`/`BorrowedFd` API** — no raw file descriptors in the public API
-- **Automatic cleanup** — received FDs are `OwnedFd`, closed on drop
-- **No fd leaks on truncation** — the high-level API sizes the receive cmsg buffer past every Unix kernel's per-message fd cap. Surplus fds beyond the caller's `N` are auto-closed; truncation cannot leak fds into the process
-- **CLOEXEC errors surfaced** — if `fcntl(FD_CLOEXEC)` fails on macOS, every received fd is closed and the error is returned
-- **Fuzz-hardened parser** — bounds-checked `cmsg_len` walk and defensive fd validation; tens of millions of fuzz executions clean
-- **Ergonomic extension traits** — `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
-- **Complete sends** — `send_fds_all()` transfers descriptors once, then finishes the payload signal-safely
-- **Strict counts** — `recv_fds_exact()` errors on descriptor-count mismatch instead of silently closing surplus fds
-- **SIGPIPE-safe** — sends suppress `SIGPIPE` (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`), and `EINTR` retries internally
-- **Truncation surfaced** — datagram payload truncation is an explicit `InvalidData` error
-- **Async support** — the same API on tokio sockets behind an optional `tokio` feature (off by default)
+- **Safe `OwnedFd`/`BorrowedFd` API.** No raw file descriptors in the public API
+- **Automatic cleanup.** Received FDs are `OwnedFd`, closed on drop
+- **No fd leaks on truncation.** The high-level API sizes the receive cmsg buffer past every Unix kernel's per-message fd cap. Surplus fds beyond the caller's `N` are auto-closed; truncation cannot leak fds into the process
+- **CLOEXEC errors surfaced.** If `fcntl(FD_CLOEXEC)` fails on macOS, every received fd is closed and the error is returned
+- **Fuzz-hardened parser.** Bounds-checked `cmsg_len` walk and defensive fd validation; tens of millions of fuzz executions clean
+- **Ergonomic extension traits.** `send_fds()` / `recv_fds()` on `UnixStream` and `UnixDatagram`
+- **Complete sends.** `send_fds_all()` transfers descriptors once, then finishes the payload signal-safely
+- **Strict counts.** `recv_fds_exact()` errors on descriptor-count mismatch instead of silently closing surplus fds
+- **SIGPIPE-safe.** Sends suppress `SIGPIPE` (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`), and `EINTR` retries internally
+- **Truncation surfaced.** Datagram payload truncation is an explicit `InvalidData` error
+- **Async support.** The same API on tokio sockets behind an optional `tokio` feature (off by default)
 
 ## When to reach for this
 
@@ -26,16 +26,16 @@ Use `unix-ancillary` when you're passing an open file descriptor between
 processes over a Unix socket and you don't want to babysit its lifetime or
 worry about it leaking. Common cases:
 
-- **Privilege separation** — a privileged process binds a socket or opens a
+- **Privilege separation.** A privileged process binds a socket or opens a
   protected file and hands the descriptor to an unprivileged worker, so the
   worker never needs the privilege itself. (See `examples/privsep.rs`.)
-- **Sandboxing / capability passing** — a supervisor opens exactly what a
+- **Sandboxing / capability passing.** A supervisor opens exactly what a
   sandboxed task may touch and passes those fds in; the sandbox gets no
   `open()` rights of its own. A natural fit for confining agent/tool
   execution. (See `examples/agent_sandbox.rs`.)
-- **Socket activation & graceful restart** — hand a live listening socket to a
+- **Socket activation & graceful restart.** Hand a live listening socket to a
   freshly-exec'd process without dropping connections.
-- **Connection handoff** — a front-end accepts a connection and passes the
+- **Connection handoff.** A front-end accepts a connection and passes the
   accepted socket to a backend worker pool.
 
 Received descriptors come back as `OwnedFd` (closed on drop) with
@@ -46,8 +46,8 @@ sockets with the `tokio` feature.
 ## Why this crate
 
 Passing fds over Unix sockets is well-trodden ground. The distinction here is
-that received descriptors are **owned and close-on-exec by default** — you
-can't forget to close one, and they don't silently leak into child processes.
+that received descriptors are owned and close-on-exec by default. You cannot
+forget to close one, and they do not silently leak into child processes.
 
 | | `unix-ancillary` | `sendfd` | `nix` / raw `libc` |
 |---|:---:|:---:|:---:|
@@ -55,17 +55,17 @@ can't forget to close one, and they don't silently leak into child processes.
 | Auto-close on drop | **yes** | no (caller owns) | no |
 | `FD_CLOEXEC` on received fds | **yes** (kernel or `fcntl`) | **no** | manual |
 | Surplus fds on over-send | **wrapped + closed** | silently dropped | manual |
-| Fuzz-hardened cmsg parser | **yes** | — | — |
+| Fuzz-hardened cmsg parser | **yes** | no | no |
 | Blocking API | yes | yes | yes |
 | Async (tokio) | **yes** (`tokio` feature) | yes | manual |
 | Stable Rust | yes | yes | yes |
 
-`sendfd` hands you `RawFd` integers with no `MSG_CMSG_CLOEXEC` — you own the
-lifetimes and the received fds are inheritable across `exec` unless you set the
+`sendfd` hands you `RawFd` integers with no `MSG_CMSG_CLOEXEC`. You own the
+lifetimes, and the received fds are inheritable across `exec` unless you set the
 flag yourself. std's `SocketAncillary` is `OwnedFd`-based but nightly-only.
 This crate is the stable, safe-by-default middle.
 
-## Quick Start
+## Quick start
 
 ```toml
 [dependencies]
@@ -88,7 +88,7 @@ tx.send_fds(b"hello", &[&file]).unwrap();
 let recv = rx.recv_fds::<1>().unwrap();
 assert_eq!(&recv.data[..], b"hello");
 assert_eq!(recv.fds.len(), 1);
-// recv.fds[0] is an OwnedFd — automatically closed on drop
+// recv.fds[0] is an OwnedFd, closed on drop
 ```
 
 > **Stream semantics:** Unix streams do not preserve send-call boundaries. A
@@ -103,20 +103,20 @@ assert_eq!(recv.fds.len(), 1);
 
 The suite in action. Three moments worth knowing:
 
-1. **The whole default suite is green** — 17 tests, including descriptor
+1. **The whole default suite is green.** 17 tests, including descriptor
    leak checks and the datagram truncation path.
-2. **`send_to_closed_peer_returns_error_without_sigpipe`** — a write to a
+2. **`send_to_closed_peer_returns_error_without_sigpipe`.** A write to a
    closed peer returns `BrokenPipe` instead of terminating the process with
    `SIGPIPE`. This one used to pass without testing anything: Rust's runtime
    sets `SIGPIPE` to `SIG_IGN` at startup, so the regression only proves
    anything once the test resets it to `SIG_DFL`.
-3. **`partial_first_send_delivers_exactly_one_descriptor`** — the
+3. **`partial_first_send_delivers_exactly_one_descriptor`.** The
    descriptor-once guarantee under a genuinely short first `sendmsg`:
    `descriptors_seen=1` while the completion loop drains the rest of the
    payload. With the default socket buffer the first send accepts all
    131072 bytes and the loop never runs; shrinking `SO_SNDBUF` to 2048 makes
-   it accept only 4480, so the loop has to finish the job — and still only
-   one descriptor arrives.
+   it accept only 4480, so the loop has to finish the job. Still only one
+   descriptor arrives.
 
 ## Bring-your-own buffer
 
@@ -131,7 +131,7 @@ let (n, fds) = rx.recv_fds_into::<4>(&mut buf).unwrap();
 
 ## Choosing a send / receive method
 
-- **`send_fds`** is one `sendmsg` — a single atomic call, not a message
+- **`send_fds`.** One `sendmsg`. A single atomic call, not a message
   transaction. It returns the number of payload bytes accepted. On a stream,
   a partial accept leaves descriptors delivered and bytes pending.
 - **`send_fds_all`** sends descriptors exactly once, then completes the
@@ -148,13 +148,13 @@ let (n, fds) = rx.recv_fds_into::<4>(&mut buf).unwrap();
   inspect a truncated datagram instead of failing, use `cmsg_recvmsg` and
   read `RecvResult::data_truncated`.
 - **Stream callers needing boundaries** (which descriptors belong to which
-  message) should use a datagram socket or frame the stream themselves — a
-  receive call may return bytes or
-  descriptors from multiple sends, or only part of one send.
+  message) should use a datagram socket or frame the stream themselves. A
+  receive call may return bytes or descriptors from multiple sends, or only
+  part of one send.
 
 ## Async (tokio)
 
-Enable the `tokio` feature — blocking users pull in no extra dependencies:
+Enable the `tokio` feature. Blocking users pull in no extra dependencies:
 
 ```toml
 [dependencies]
@@ -206,7 +206,7 @@ Result: truncation is kernel-impossible on every supported platform.
 - Every fd the receiving kernel deposits is wrapped in `OwnedFd` immediately.
 - Caller gets the first `N`; the rest drop and close on the spot. Zero leak.
 - If `MSG_CTRUNC` somehow fires anyway, every extracted fd is closed and an
-  error is returned — caller never sees partial state.
+  error is returned, so the caller never sees partial state.
 
 Low-level callers using `SocketAncillary` directly manage their own buffer
 and must size it correctly; the `is_truncated()` flag is exposed for that
@@ -220,9 +220,8 @@ soundness fixes shipped in 0.2.2 from that effort:
 - `Messages::next` validates `cmsg_len` fits in the remaining buffer before
   calling libc's `CMSG_NXTHDR` (which performs unchecked pointer arithmetic
   on that field). Malformed cmsgs terminate the walk cleanly.
-- `ScmRights::next` skips negative fd values silently — kernels never deliver
-  them via `SCM_RIGHTS`, but the parser is now defensive against any byte
-  source.
+- `ScmRights::next` skips negative fd values silently. Kernels never deliver
+  them via `SCM_RIGHTS`, but the parser is defensive against any byte source.
 
 Neither path is reachable from a real `recvmsg`; the hardening protects
 against replay scenarios, shared-memory cmsg blobs, and similar non-kernel
@@ -240,11 +239,11 @@ immediately after `recvmsg` returns, but a concurrent `fork`+`exec` between
 the two calls can leak the fd into the child. If your workload forks
 concurrently with fd-receiving threads, hold a fork lock around the receive.
 
-## Platform Support
+## Platform support
 
-- **Linux** — full support with `MSG_CMSG_CLOEXEC`
-- **macOS** — supported with `fcntl` CLOEXEC fallback (see caveat above)
-- **FreeBSD, OpenBSD, NetBSD, DragonFly** — supported with `MSG_CMSG_CLOEXEC`
+- **Linux.** Full support with `MSG_CMSG_CLOEXEC`
+- **macOS.** Supported with `fcntl` CLOEXEC fallback (see caveat above)
+- **FreeBSD, OpenBSD, NetBSD, DragonFly.** Supported with `MSG_CMSG_CLOEXEC`
 
 ## License
 

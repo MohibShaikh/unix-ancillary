@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.5.0] - 2026-09-03
+
+### Breaking
+
+- `AncillaryData` is now `#[non_exhaustive]`. A match on it needs a wildcard
+  arm. This is the only reason 0.5.0 is a break: it is done now so that every
+  future control-message kind is an additive change instead of another major.
+
+### Added
+
+- `send_fds_vectored` and `recv_fds_vectored` on all four extension traits,
+  blocking and tokio. Descriptors ride the same `sendmsg` as the whole iovec,
+  so a framed protocol sends header and body without copying them into one
+  buffer first. The stream empty-payload rule is checked against the total
+  length across `iov`, not per buffer.
+
+  There is no `send_fds_vectored_all`. The vectored send is one `sendmsg`, so
+  on a stream it can accept part of the payload while still delivering every
+  descriptor. The docs say so at each call site.
+
+- `examples/dep_api_check.rs`, which compiles the call shapes the one published
+  downstream uses, so a future release cannot break it silently.
+
+### Internal
+
+- The scalar `send_fds` and `recv_fds_into` paths now delegate to the vectored
+  ones, leaving a single code path. Verified with `strace` against 0.4.0: the
+  `msghdr` for a scalar send is byte-identical, `msg_iovlen=1`.
+
+### Docs
+
+- `[package.metadata.docs.rs] targets` now builds linux, both apple targets,
+  freebsd and netbsd, so the macOS `RLIMIT_NOFILE` and `fcntl` CLOEXEC claims
+  are backed by a published build.
+- README and AGENTS.md rewritten to drop em dashes and title-case headings.
+
 ## [0.4.0] - 2026-08-17
 
 ### Behavior changes (breaking)

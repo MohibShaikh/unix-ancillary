@@ -69,14 +69,26 @@ pub(crate) fn send_fds_impl(
     data: &[u8],
     fds: &[BorrowedFd<'_>],
 ) -> io::Result<usize> {
+    send_fds_vectored_impl(fd, &[io::IoSlice::new(data)], fds)
+}
+
+pub(crate) fn send_fds_vectored_impl(
+    fd: BorrowedFd<'_>,
+    iov: &[io::IoSlice<'_>],
+    fds: &[BorrowedFd<'_>],
+) -> io::Result<usize> {
     let mut buf = vec![0u8; SocketAncillary::buffer_size_for_rights(fds.len())];
     let mut ancillary = SocketAncillary::new(&mut buf);
     ancillary
         .add_fds(fds)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-    let iov = [io::IoSlice::new(data)];
-    cmsg::sendmsg_vectored(fd, &iov, ancillary.buffer, ancillary.length)
+    cmsg::sendmsg_vectored(fd, iov, ancillary.buffer, ancillary.length)
+}
+
+/// Total payload bytes across the iovecs, for the stream empty-payload rule.
+pub(crate) fn iov_len(iov: &[io::IoSlice<'_>]) -> usize {
+    iov.iter().map(|s| s.len()).sum()
 }
 
 /// Receive into `data_buf`, capping fds returned to the caller at `N`.
@@ -99,11 +111,20 @@ pub(crate) fn recv_fds_into_impl(
     kind: SocketKind,
     mode: CountMode,
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
+    let mut iov = [io::IoSliceMut::new(data_buf)];
+    recv_fds_into_vectored_impl(fd, &mut iov, kind, mode)
+}
+
+pub(crate) fn recv_fds_into_vectored_impl(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    kind: SocketKind,
+    mode: CountMode,
+) -> io::Result<(usize, Vec<OwnedFd>)> {
     let cap = mode.count().max(platform::max_recv_fds());
     let mut anc_buf = vec![0u8; SocketAncillary::buffer_size_for_rights(cap)];
 
-    let mut iov = [io::IoSliceMut::new(data_buf)];
-    let result = cmsg::recvmsg_vectored(fd, &mut iov, &mut anc_buf)?;
+    let result = cmsg::recvmsg_vectored(fd, iov, &mut anc_buf)?;
 
     let ancillary = SocketAncillary {
         buffer: &mut anc_buf,
@@ -189,6 +210,33 @@ pub trait UnixStreamExt {
     /// progress.
     fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()>;
 
+    /// Send several payload buffers plus borrowed descriptors in one syscall.
+    ///
+    /// The descriptors ride the same `sendmsg` as the whole iovec, so a header
+    /// and a body go out without being copied into one buffer first. The
+    /// stream rule still applies: at least one payload byte across all of
+    /// `iov` when descriptors are present.
+    ///
+    /// There is no `send_fds_vectored_all`. Like [`send_fds`](Self::send_fds)
+    /// this is one `sendmsg`, so on a stream it can accept only part of the
+    /// payload while still delivering every descriptor. If you need the
+    /// completion loop, call this once and finish the remaining bytes
+    /// yourself, or use [`send_fds_all`](Self::send_fds_all) with a single
+    /// contiguous buffer.
+    fn send_fds_vectored(
+        &self,
+        iov: &[io::IoSlice<'_>],
+        fds: &[impl AsFd],
+    ) -> io::Result<usize>;
+
+    /// Receive into several caller-supplied buffers, capping fds at `N`.
+    ///
+    /// Returns `(bytes_read, fds)`, filling `iov` in order.
+    fn recv_fds_vectored<const N: usize>(
+        &self,
+        iov: &mut [io::IoSliceMut<'_>],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
+
     /// Receive data and up to `N` file descriptors.
     ///
     /// Allocates an internal 4 KiB data buffer plus an oversized cmsg buffer
@@ -223,6 +271,28 @@ impl UnixStreamExt for UnixStream {
         validate_stream_send(data, fds.len())?;
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         send_fds_impl(self.as_fd(), data, &borrowed)
+    }
+
+    fn send_fds_vectored(
+        &self,
+        iov: &[io::IoSlice<'_>],
+        fds: &[impl AsFd],
+    ) -> io::Result<usize> {
+        if !fds.is_empty() && iov_len(iov) == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SCM_RIGHTS over a Unix stream requires at least one payload byte",
+            ));
+        }
+        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
+        send_fds_vectored_impl(self.as_fd(), iov, &borrowed)
+    }
+
+    fn recv_fds_vectored<const N: usize>(
+        &self,
+        iov: &mut [io::IoSliceMut<'_>],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        recv_fds_into_vectored_impl(self.as_fd(), iov, SocketKind::Stream, CountMode::UpTo(N))
     }
 
     fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()> {
@@ -315,6 +385,20 @@ pub trait UnixDatagramExt {
     /// Send `data` plus borrowed fds. The socket must be connected.
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
 
+    /// Send several payload buffers plus borrowed descriptors in one datagram.
+    fn send_fds_vectored(
+        &self,
+        iov: &[io::IoSlice<'_>],
+        fds: &[impl AsFd],
+    ) -> io::Result<usize>;
+
+    /// Receive one datagram into several caller-supplied buffers, capping fds
+    /// at `N`. Returns `(bytes_read, fds)`.
+    fn recv_fds_vectored<const N: usize>(
+        &self,
+        iov: &mut [io::IoSliceMut<'_>],
+    ) -> io::Result<(usize, Vec<OwnedFd>)>;
+
     /// Receive data and up to `N` fds.
     ///
     /// Allocates an internal 64 KiB data buffer plus an oversized cmsg
@@ -345,6 +429,22 @@ pub trait UnixDatagramExt {
 }
 
 impl UnixDatagramExt for UnixDatagram {
+    fn send_fds_vectored(
+        &self,
+        iov: &[io::IoSlice<'_>],
+        fds: &[impl AsFd],
+    ) -> io::Result<usize> {
+        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
+        send_fds_vectored_impl(self.as_fd(), iov, &borrowed)
+    }
+
+    fn recv_fds_vectored<const N: usize>(
+        &self,
+        iov: &mut [io::IoSliceMut<'_>],
+    ) -> io::Result<(usize, Vec<OwnedFd>)> {
+        recv_fds_into_vectored_impl(self.as_fd(), iov, SocketKind::Datagram, CountMode::UpTo(N))
+    }
+
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         send_fds_impl(self.as_fd(), data, &borrowed)

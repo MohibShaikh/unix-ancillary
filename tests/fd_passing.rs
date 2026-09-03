@@ -95,10 +95,11 @@ fn low_level_api() {
 
     let mut fd_count = 0;
     for msg in recv_anc.messages() {
-        match msg {
-            AncillaryData::ScmRights(rights) => {
-                fd_count += rights.count();
-            }
+        // AncillaryData is #[non_exhaustive]. This test is a separate crate, so
+        // it sees the same requirement a downstream user does: no exhaustive
+        // match on the enum.
+        if let AncillaryData::ScmRights(rights) = msg {
+            fd_count += rights.count();
         }
     }
     assert_eq!(fd_count, 1);
