@@ -5,11 +5,23 @@
 ### Breaking
 
 - `AncillaryData` is now `#[non_exhaustive]`. A match on it needs a wildcard
-  arm. This is the only reason 0.5.0 is a break: it is done now so that every
-  future control-message kind is an additive change instead of another major.
+  arm. This is the only break in the release, taken so that every future
+  control-message kind is additive rather than another major. The credentials
+  variant below is the first thing it paid for.
 
 ### Added
 
+- `AncillaryData::Credentials`, carrying `SCM_CREDENTIALS` on Linux and
+  Android. Descriptors and credentials come out of the same `recvmsg`, off the
+  same cmsg buffer, which is why they live in one crate.
+- `ScmCredentials` with `pid`, `uid`, `gid`, and `for_this_process()` for the
+  values any unprivileged sender may claim. Claiming anything else fails the
+  send with `EPERM`, documented on both constructors.
+- `set_passcred` and `passcred`, free functions over `AsFd` and methods on both
+  extension traits. Credentials only arrive on a socket with `SO_PASSCRED` set,
+  and it must be set before the message is received.
+- `SocketAncillary::add_credentials` and `buffer_size_for_credentials`, so one
+  message can carry descriptors and credentials together.
 - `send_fds_vectored` and `recv_fds_vectored` on all four extension traits,
   blocking and tokio. Descriptors ride the same `sendmsg` as the whole iovec,
   so a framed protocol sends header and body without copying them into one
@@ -19,15 +31,21 @@
   There is no `send_fds_vectored_all`. The vectored send is one `sendmsg`, so
   on a stream it can accept part of the payload while still delivering every
   descriptor. The docs say so at each call site.
-
 - `examples/dep_api_check.rs`, which compiles the call shapes the one published
   downstream uses, so a future release cannot break it silently.
 
+Not covered: BSD `SCM_CREDS`, which is sent implicitly rather than attached, so
+modelling it as this variant would describe semantics that platform does not
+have. `SO_PEERCRED` is also out of scope; it is a `getsockopt` answering "who
+connected" once per connection, not a control message.
+
 ### Internal
 
-- The scalar `send_fds` and `recv_fds_into` paths now delegate to the vectored
+- The scalar `send_fds` and `recv_fds_into` paths delegate to the vectored
   ones, leaving a single code path. Verified with `strace` against 0.4.0: the
   `msghdr` for a scalar send is byte-identical, `msg_iovlen=1`.
+- `add_fds` and `add_credentials` share one `add_cmsg` writer, so both get the
+  same buffer walk and bounds checks.
 
 ### Docs
 

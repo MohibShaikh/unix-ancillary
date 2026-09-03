@@ -7,7 +7,8 @@ use unix_ancillary::UnixStreamExt as _;
 fn main() -> std::io::Result<()> {
     let (tx, rx) = UnixStream::pair()?;
     let (s, _keep) = UnixStream::pair()?;
-    tx.send_fds(b"hello", &[&s]).expect("send system_bus_socket fd");
+    tx.send_fds(b"hello", &[&s])
+        .expect("send system_bus_socket fd");
     let recv = rx.recv_fds::<1>()?;
     println!("data={:?} fds={}", recv.data, recv.fds.len());
     Ok(())

@@ -22,6 +22,12 @@ impl std::error::Error for AncillaryError {}
 pub enum AncillaryData<'a> {
     /// File descriptors received via `SCM_RIGHTS`.
     ScmRights(ScmRights<'a>),
+    /// Sender credentials received via `SCM_CREDENTIALS`.
+    ///
+    /// Only arrives on a socket with `SO_PASSCRED` set. See
+    /// [`set_passcred`](crate::set_passcred).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Credentials(crate::ScmCredentials),
 }
 
 /// Iterator over file descriptors received via `SCM_RIGHTS`.
@@ -172,6 +178,29 @@ impl<'a> Iterator for Messages<'a> {
                 let data: &'a [u8] = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
                 return Some(AncillaryData::ScmRights(ScmRights::new(data)));
             }
+
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            if level == libc::SOL_SOCKET
+                && ty == libc::SCM_CREDENTIALS
+                && data_len >= crate::ScmCredentials::SIZE
+            {
+                // SAFETY: data_ptr is in-buffer and the length check above
+                // guarantees a whole ucred is present. Copied out rather than
+                // borrowed, because ucred is plain data and may be unaligned
+                // in the cmsg buffer.
+                let cred: libc::ucred = unsafe {
+                    let mut c = std::mem::MaybeUninit::<libc::ucred>::uninit();
+                    std::ptr::copy_nonoverlapping(
+                        data_ptr,
+                        c.as_mut_ptr().cast::<u8>(),
+                        crate::ScmCredentials::SIZE,
+                    );
+                    c.assume_init()
+                };
+                return Some(AncillaryData::Credentials(
+                    crate::ScmCredentials::from_ucred(cred),
+                ));
+            }
             // Unknown cmsg type — skip and continue walking. If we marked
             // `current` null above (malformed), the next loop iteration
             // returns None.
@@ -203,6 +232,99 @@ impl<'a> SocketAncillary<'a> {
     pub fn buffer_size_for_rights(num_fds: usize) -> usize {
         // SAFETY: CMSG_SPACE is a pure inline calculation.
         unsafe { libc::CMSG_SPACE((num_fds * mem::size_of::<RawFd>()) as libc::c_uint) as usize }
+    }
+
+    /// Minimum buffer size needed to carry one `SCM_CREDENTIALS` cmsg.
+    ///
+    /// Add this to [`buffer_size_for_rights`](Self::buffer_size_for_rights)
+    /// when one message carries both.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn buffer_size_for_credentials() -> usize {
+        // SAFETY: CMSG_SPACE is a pure inline calculation.
+        unsafe { libc::CMSG_SPACE(crate::ScmCredentials::SIZE as libc::c_uint) as usize }
+    }
+
+    /// Append sender credentials as an `SCM_CREDENTIALS` cmsg.
+    ///
+    /// The kernel rejects the send with `EPERM` if this process is not allowed
+    /// to claim the values. [`ScmCredentials::for_this_process`] is always
+    /// allowed. A receiver with `SO_PASSCRED` set gets credentials even when
+    /// nothing is attached here, so this is only needed to claim values other
+    /// than the defaults.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn add_credentials(&mut self, creds: crate::ScmCredentials) -> Result<(), AncillaryError> {
+        let cred = creds.to_ucred();
+        // SAFETY: plain data with no padding concerns for a byte copy.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&cred as *const libc::ucred).cast::<u8>(),
+                crate::ScmCredentials::SIZE,
+            )
+        };
+        self.add_cmsg(libc::SOL_SOCKET, libc::SCM_CREDENTIALS, bytes)
+    }
+
+    /// Append one control message with an arbitrary payload.
+    ///
+    /// Shared by `add_fds` and `add_credentials`: same buffer walk, same
+    /// bounds checks, only the level, type and payload differ.
+    fn add_cmsg(
+        &mut self,
+        level: libc::c_int,
+        ty: libc::c_int,
+        payload: &[u8],
+    ) -> Result<(), AncillaryError> {
+        // SAFETY: pure inline calculation.
+        let space = unsafe { libc::CMSG_SPACE(payload.len() as libc::c_uint) as usize };
+        let new_len = self.length.checked_add(space).ok_or(AncillaryError)?;
+        if new_len > self.buffer.len() {
+            return Err(AncillaryError);
+        }
+
+        // SAFETY: identical walk to add_fds. The buffer is exclusively
+        // borrowed and proven large enough for `new_len` bytes above; the
+        // payload is copied into the data area CMSG_DATA points at, which
+        // CMSG_SPACE reserved.
+        unsafe {
+            let mut msg: libc::msghdr = mem::zeroed();
+            msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = new_len as _;
+
+            let cmsg = if self.length == 0 {
+                libc::CMSG_FIRSTHDR(&msg)
+            } else {
+                let mut walk_msg: libc::msghdr = mem::zeroed();
+                walk_msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
+                walk_msg.msg_controllen = self.length as _;
+
+                let mut cur = libc::CMSG_FIRSTHDR(&walk_msg);
+                while !cur.is_null() {
+                    let next = libc::CMSG_NXTHDR(&walk_msg, cur);
+                    if next.is_null() {
+                        break;
+                    }
+                    cur = next;
+                }
+                if cur.is_null() {
+                    libc::CMSG_FIRSTHDR(&msg)
+                } else {
+                    libc::CMSG_NXTHDR(&msg, cur)
+                }
+            };
+
+            if cmsg.is_null() {
+                return Err(AncillaryError);
+            }
+
+            (*cmsg).cmsg_level = level;
+            (*cmsg).cmsg_type = ty;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(payload.len() as libc::c_uint) as _;
+
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), libc::CMSG_DATA(cmsg), payload.len());
+        }
+
+        self.length = new_len;
+        Ok(())
     }
 
     /// Append file descriptors as an `SCM_RIGHTS` cmsg.

@@ -95,10 +95,14 @@ mod ancillary;
 #[cfg(feature = "tokio")]
 mod asyncio;
 mod cmsg;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod credentials;
 mod ext;
 mod platform;
 
 pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub use credentials::{passcred, set_passcred, ScmCredentials};
 pub use ext::{ReceivedFds, UnixDatagramExt, UnixStreamExt};
 
 #[cfg(feature = "tokio")]
