@@ -247,7 +247,8 @@ impl<'a> SocketAncillary<'a> {
     /// Append sender credentials as an `SCM_CREDENTIALS` cmsg.
     ///
     /// The kernel rejects the send with `EPERM` if this process is not allowed
-    /// to claim the values. [`ScmCredentials::for_this_process`] is always
+    /// to claim the values. [`ScmCredentials::for_this_process`](crate::ScmCredentials::for_this_process)
+    /// is always
     /// allowed. A receiver with `SO_PASSCRED` set gets credentials even when
     /// nothing is attached here, so this is only needed to claim values other
     /// than the defaults.
@@ -331,63 +332,15 @@ impl<'a> SocketAncillary<'a> {
     ///
     /// `BorrowedFd` ensures the caller retains ownership of the fds.
     pub fn add_fds(&mut self, fds: &[BorrowedFd<'_>]) -> Result<(), AncillaryError> {
-        let fd_bytes_len = fds.len() * mem::size_of::<RawFd>();
-        // SAFETY: pure inline calculation.
-        let space = unsafe { libc::CMSG_SPACE(fd_bytes_len as libc::c_uint) as usize };
-
-        let new_len = self.length.checked_add(space).ok_or(AncillaryError)?;
-        if new_len > self.buffer.len() {
-            return Err(AncillaryError);
-        }
-
-        // SAFETY: we walk the buffer with cmsg(3) macros and write a single
-        // cmsghdr + fd payload at the correct offset. The buffer is
-        // exclusively borrowed and large enough for `new_len` bytes.
-        unsafe {
-            let mut msg: libc::msghdr = mem::zeroed();
-            msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
-            msg.msg_controllen = new_len as _;
-
-            let cmsg = if self.length == 0 {
-                libc::CMSG_FIRSTHDR(&msg)
-            } else {
-                let mut walk_msg: libc::msghdr = mem::zeroed();
-                walk_msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
-                walk_msg.msg_controllen = self.length as _;
-
-                let mut cur = libc::CMSG_FIRSTHDR(&walk_msg);
-                while !cur.is_null() {
-                    let next = libc::CMSG_NXTHDR(&walk_msg, cur);
-                    if next.is_null() {
-                        break;
-                    }
-                    cur = next;
-                }
-                if cur.is_null() {
-                    libc::CMSG_FIRSTHDR(&msg)
-                } else {
-                    libc::CMSG_NXTHDR(&msg, cur)
-                }
-            };
-
-            if cmsg.is_null() {
-                return Err(AncillaryError);
-            }
-
-            (*cmsg).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(fd_bytes_len as libc::c_uint) as _;
-
-            // Write fds straight into the cmsg data area. `write_unaligned`
-            // because `CMSG_DATA` is not guaranteed to be `RawFd`-aligned.
-            let data_ptr = libc::CMSG_DATA(cmsg) as *mut RawFd;
-            for (i, fd) in fds.iter().enumerate() {
-                std::ptr::write_unaligned(data_ptr.add(i), fd.as_raw_fd());
-            }
-        }
-
-        self.length = new_len;
-        Ok(())
+        let raw: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
+        // SAFETY: RawFd is a plain i32 with no padding and no invalid bit
+        // patterns, so viewing the slice as bytes is sound. add_cmsg copies
+        // them into the cmsg data area, which is what the previous
+        // write_unaligned loop did one fd at a time.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), mem::size_of_val(&raw[..]))
+        };
+        self.add_cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, bytes)
     }
 
     /// Iterate received ancillary data messages.

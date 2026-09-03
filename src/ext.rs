@@ -136,10 +136,13 @@ pub(crate) fn recv_fds_into_vectored_impl(
     // at function exit, closing them and preventing leaks.
     let mut all_fds: Vec<OwnedFd> = Vec::new();
     for msg in ancillary.messages() {
-        // Credentials and any future variant are not this function's business.
-        // It exists to collect descriptors.
-        if let AncillaryData::ScmRights(rights) = msg {
-            all_fds.extend(rights);
+        // This function exists to collect descriptors. The credentials arm is
+        // cfg'd rather than a wildcard: on a target without it the enum has one
+        // variant and `if let` would be irrefutable, which is denied here.
+        match msg {
+            AncillaryData::ScmRights(rights) => all_fds.extend(rights),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            AncillaryData::Credentials(_) => {}
         }
     }
 
@@ -191,15 +194,6 @@ pub(crate) fn recv_fds_into_vectored_impl(
 
 /// Extension trait for `UnixStream` adding fd-passing convenience methods.
 pub trait UnixStreamExt {
-    /// Turn `SO_PASSCRED` on or off.
-    ///
-    /// Credentials arrive as [`AncillaryData::Credentials`](crate::AncillaryData::Credentials)
-    /// only on a socket with this set, and it must be set before the message
-    /// is received. Once on, the kernel attaches the sender's credentials to
-    /// every message whether or not the sender attached any.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn set_passcred(&self, on: bool) -> io::Result<()>;
-
     /// Send `data` plus borrowed file descriptors over the stream.
     ///
     /// Caller retains ownership of the fds.
@@ -274,11 +268,6 @@ pub trait UnixStreamExt {
 }
 
 impl UnixStreamExt for UnixStream {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn set_passcred(&self, on: bool) -> io::Result<()> {
-        crate::set_passcred(self, on)
-    }
-
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
         validate_stream_send(data, fds.len())?;
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
@@ -390,15 +379,6 @@ impl UnixStreamExt for UnixStream {
 /// truncated datagram must use [`crate::cmsg_recvmsg`] and read
 /// [`crate::RecvResult::data_truncated`].
 pub trait UnixDatagramExt {
-    /// Turn `SO_PASSCRED` on or off.
-    ///
-    /// Credentials arrive as [`AncillaryData::Credentials`](crate::AncillaryData::Credentials)
-    /// only on a socket with this set, and it must be set before the message
-    /// is received. Once on, the kernel attaches the sender's credentials to
-    /// every message whether or not the sender attached any.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn set_passcred(&self, on: bool) -> io::Result<()>;
-
     /// Send `data` plus borrowed fds. The socket must be connected.
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize>;
 
@@ -442,11 +422,6 @@ pub trait UnixDatagramExt {
 }
 
 impl UnixDatagramExt for UnixDatagram {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn set_passcred(&self, on: bool) -> io::Result<()> {
-        crate::set_passcred(self, on)
-    }
-
     fn send_fds_vectored(&self, iov: &[io::IoSlice<'_>], fds: &[impl AsFd]) -> io::Result<usize> {
         let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         send_fds_vectored_impl(self.as_fd(), iov, &borrowed)

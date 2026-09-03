@@ -107,6 +107,13 @@ impl ScmCredentials {
 
 /// Turn `SO_PASSCRED` on or off for a socket.
 ///
+/// A free function rather than an extension-trait method on purpose. std has an
+/// unstable inherent `UnixStream::set_passcred`, and a trait method of the same
+/// name collides with it: today that is an `unstable_name_collisions` warning,
+/// and if std stabilizes it the inherent method silently wins. Taking `AsFd`
+/// also means this works on a tokio socket or a bare `OwnedFd`, which a method
+/// on the std types would not.
+///
 /// Credentials only arrive on a socket that has this set, and it must be set
 /// before the message is received. Once on, the kernel attaches the sender's
 /// credentials to every message whether or not the sender asked, so this is

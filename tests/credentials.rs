@@ -2,7 +2,7 @@
 
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
-use unix_ancillary::{AncillaryData, ScmCredentials, SocketAncillary, UnixStreamExt};
+use unix_ancillary::{set_passcred, AncillaryData, ScmCredentials, SocketAncillary, UnixStreamExt};
 
 fn me() -> (i32, u32, u32) {
     (
@@ -18,7 +18,7 @@ fn me() -> (i32, u32, u32) {
 fn fds_and_credentials_arrive_from_one_recvmsg() {
     let (tx, rx) = UnixStream::pair().unwrap();
     let (payload, _keep) = UnixStream::pair().unwrap();
-    rx.set_passcred(true).unwrap();
+    set_passcred(&rx, true).unwrap();
 
     let mut buf = vec![
         0u8;
@@ -63,7 +63,7 @@ fn fds_and_credentials_arrive_from_one_recvmsg() {
 #[test]
 fn kernel_supplies_credentials_when_sender_sends_none() {
     let (tx, rx) = UnixStream::pair().unwrap();
-    rx.set_passcred(true).unwrap();
+    set_passcred(&rx, true).unwrap();
 
     tx.send_fds(b"hi", &[] as &[std::os::unix::net::UnixStream])
         .unwrap();

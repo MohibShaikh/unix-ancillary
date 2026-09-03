@@ -17,9 +17,12 @@
 - `ScmCredentials` with `pid`, `uid`, `gid`, and `for_this_process()` for the
   values any unprivileged sender may claim. Claiming anything else fails the
   send with `EPERM`, documented on both constructors.
-- `set_passcred` and `passcred`, free functions over `AsFd` and methods on both
-  extension traits. Credentials only arrive on a socket with `SO_PASSCRED` set,
-  and it must be set before the message is received.
+- `set_passcred` and `passcred`, free functions over `AsFd`. Credentials only
+  arrive on a socket with `SO_PASSCRED` set, and it must be set before the
+  message is received. Free functions rather than extension-trait methods
+  because std has an unstable inherent `UnixStream::set_passcred`; a trait
+  method of that name collides with it, and would silently lose to it if std
+  stabilizes. Taking `AsFd` also covers tokio sockets and bare `OwnedFd`.
 - `SocketAncillary::add_credentials` and `buffer_size_for_credentials`, so one
   message can carry descriptors and credentials together.
 - `send_fds_vectored` and `recv_fds_vectored` on all four extension traits,
