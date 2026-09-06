@@ -152,9 +152,15 @@ fn unaligned_buffers_roundtrip() {
         let file = File::open("/dev/null").unwrap();
         let mut send_buf = [0; 128];
         let mut anc = SocketAncillary::new(&mut send_buf[offset..]);
-        anc.add_fds(&[file.as_fd()]).unwrap();
-        // Multiple headers exercise offset advancement as well as the first header.
-        anc.add_fds(&[file.as_fd()]).unwrap();
+        // XNU accepts only one SCM_RIGHTS header per send. Still exercise two
+        // descriptors at every offset; other targets also test header advancement.
+        #[cfg(target_vendor = "apple")]
+        anc.add_fds(&[file.as_fd(), file.as_fd()]).unwrap();
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            anc.add_fds(&[file.as_fd()]).unwrap();
+            anc.add_fds(&[file.as_fd()]).unwrap();
+        }
         cmsg_sendmsg(tx.as_fd(), &[IoSlice::new(b"x")], &anc).unwrap();
         let mut recv_buf = [0; 128];
         let mut recv = SocketAncillary::new(&mut recv_buf[offset..]);

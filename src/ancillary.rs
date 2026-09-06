@@ -273,6 +273,8 @@ impl<'a> SocketAncillary<'a> {
 
     /// Append borrowed descriptors, retaining their lifetimes in this buffer.
     /// The caller keeps ownership. Clear a received buffer before adding data.
+    /// On Apple platforms, supply all descriptors in one call: the kernel
+    /// rejects sends containing multiple SCM_RIGHTS headers.
     ///
     /// ```compile_fail,E0505
     /// use std::os::fd::AsFd;
