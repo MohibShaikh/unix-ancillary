@@ -30,13 +30,12 @@ and its `ScmRights` iterator yields raw descriptors.
 
 ## Quick start
 
-The working tree targets **0.6.0 (unreleased)**. Until publication, use a local
-path dependency to evaluate these repairs; the registry's 0.5.0 has the safety
-issues described in the [changelog](CHANGELOG.md).
+Version **0.6.0** repairs the low-level safety issues described in the
+[changelog](CHANGELOG.md). See [MIGRATION.md](MIGRATION.md) when upgrading.
 
 ```toml
 [dependencies]
-unix-ancillary = { path = "../unix-ancillary" }
+unix-ancillary = "0.6"
 # Add features = ["tokio"] for the async extension traits.
 ```
 

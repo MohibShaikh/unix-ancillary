@@ -1,8 +1,7 @@
 # Migrating to 0.6.0
 
-0.6.0 is currently unreleased. It repairs the safe low-level ancillary API and
-retains the high-level blocking and Tokio FD-passing call shapes. Use a checkout
-or path dependency to evaluate it until the release is published.
+0.6.0 repairs the safe low-level ancillary API and
+retains the high-level blocking and Tokio FD-passing call shapes.
 
 ## From unix-ancillary 0.5
 
