@@ -78,6 +78,8 @@ fn main() -> io::Result<()> {
                 Err(e) => return Err(e),
             }
         };
+        // Accepted sockets can inherit the listener's nonblocking mode.
+        socket.set_nonblocking(false)?;
         socket.set_read_timeout(Some(TIMEOUT))?;
         socket.set_write_timeout(Some(TIMEOUT))?;
         socket.send_fds_all(b"F", &[&read_only])?;
