@@ -1,0 +1,134 @@
+   Compiling libc v0.2.182
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.44
+   Compiling unicode-ident v1.0.24
+   Compiling rustix v0.38.44
+   Compiling linux-raw-sys v0.4.15
+   Compiling bitflags v2.11.0
+   Compiling fastrand v2.3.0
+   Compiling pin-project-lite v0.2.17
+   Compiling cfg-if v1.0.4
+   Compiling bytes v1.12.1
+   Compiling once_cell v1.21.3
+   Compiling syn v2.0.117
+   Compiling socket2 v0.6.5
+   Compiling mio v1.1.1
+   Compiling unix-ancillary v0.6.0 (/work)
+   Compiling tempfile v3.14.0
+   Compiling tokio-macros v2.6.1
+   Compiling tokio v1.50.0
+    Finished dev [unoptimized + debuginfo] target(s) in 11.98s
+    Finished test [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/unix_ancillary-fac1e83990490564)
+
+running 2 tests
+test platform::tests::clamp_nofile_maps_special_and_out_of_range_values ... ok
+test platform::tests::cloexec_received_sets_flag_via_fcntl ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ancillary_ownership.rs (target/debug/deps/ancillary_ownership-7efbfd73be13de1a)
+
+running 10 tests
+test dropping_messages_without_iteration_closes_fds ... ok
+test dropping_receive_buffer_closes_unread_fds ... ok
+test clearing_receive_buffer_closes_unread_fds ... ok
+test failed_receive_does_not_retain_previous_messages ... ok
+test partial_rights_iteration_closes_remainder ... ok
+test receive_buffer_cannot_be_sent_until_cleared ... ok
+test receive_messages_are_consumed_once ... ok
+test reusing_receive_buffer_closes_old_fds ... ok
+test send_buffer_never_yields_owners ... ok
+
+running 1 test
+test unaligned_buffers_roundtrip ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+test unaligned_buffers_roundtrip ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/async_fd.rs (target/debug/deps/async_fd-00c1967fdd96e1df)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/credentials.rs (target/debug/deps/credentials-207087509ccafd07)
+
+running 5 tests
+test kernel_supplies_credentials_when_sender_sends_none ... ok
+test fds_and_credentials_arrive_from_one_recvmsg ... ok
+test no_credentials_without_passcred ... ok
+test maximum_rights_with_automatic_credentials_datagram ... ok
+test maximum_rights_with_automatic_credentials_stream ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/fd_leak.rs (target/debug/deps/fd_leak-1b2a93a3dd4a8301)
+
+running 2 tests
+test surplus_fds_dropped_not_leaked ... ok
+test exact_receive_error_closes_all_received_fds ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fd_passing.rs (target/debug/deps/fd_passing-2ab2ccc0a9ac0954)
+
+running 17 tests
+test buffer_size_calculation ... ok
+test ancillary_buffer_too_small ... ok
+test datagram_payload_truncation_is_an_error ... ok
+test low_level_api ... ok
+test owned_fd_closes_on_drop ... ok
+test recv_exact_accepts_exact_count ... ok
+test recv_exact_datagram_accepts_exact_count ... ok
+test recv_exact_rejects_too_many ... ok
+test send_recv_single_fd ... ok
+test recv_exact_rejects_too_few ... ok
+test recv_fds_into_with_user_buffer ... ok
+test partial_first_send_delivers_exactly_one_descriptor ... ok
+test send_recv_multiple_fds ... ok
+test send_fds_all_transfers_payload_and_descriptor ... ok
+test stream_allows_empty_payload_without_fds ... ok
+test stream_rejects_fds_without_payload_byte ... ok
+
+running 1 test
+send to closed peer returned: Err(Os { code: 32, kind: BrokenPipe, message: "Broken pipe" })
+test send_to_closed_peer_returns_error_without_sigpipe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test send_to_closed_peer_returns_error_without_sigpipe ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vectored.rs (target/debug/deps/vectored-79792ec4fe28a05d)
+
+running 4 tests
+test stream_vectored_allows_empty_payload_without_fds ... ok
+test datagram_vectored_roundtrip ... ok
+test stream_vectored_rejects_empty_payload_with_fds ... ok
+test stream_vectored_roundtrip_keeps_order_and_fd ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests unix-ancillary
+
+running 5 tests
+test src/lib.rs - (line 42) - compile ... ok
+test src/ancillary.rs - ancillary::SocketAncillary<'a>::add_fds (line 277) - compile fail ... ok
+test src/lib.rs - (line 155) ... ok
+test src/lib.rs - (line 94) ... ok
+test src/lib.rs - (line 125) ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+    Checking libc v0.2.182
+    Checking pin-project-lite v0.2.17
+    Checking socket2 v0.6.5
+    Checking mio v1.1.1
+    Checking tokio v1.50.0
+    Checking unix-ancillary v0.6.0 (/work)
+    Finished dev [unoptimized + debuginfo] target(s) in 2.95s

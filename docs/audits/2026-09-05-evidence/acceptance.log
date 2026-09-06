@@ -1,0 +1,221 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded bitflags v2.11.0
+  Downloaded cfg-if v1.0.4
+  Downloaded bytes v1.12.1
+  Downloaded fastrand v2.3.0
+  Downloaded errno v0.3.14
+  Downloaded once_cell v1.21.3
+  Downloaded rustix v0.38.44
+  Downloaded tempfile v3.14.0
+  Downloaded quote v1.0.44
+  Downloaded mio v1.1.1
+  Downloaded proc-macro2 v1.0.106
+  Downloaded pin-project-lite v0.2.17
+  Downloaded syn v2.0.117
+  Downloaded unicode-ident v1.0.24
+  Downloaded socket2 v0.6.5
+  Downloaded tokio-macros v2.6.1
+  Downloaded tokio v1.50.0
+  Downloaded linux-raw-sys v0.4.15
+  Downloaded libc v0.2.182
+   Compiling proc-macro2 v1.0.106
+   Compiling libc v0.2.182
+   Compiling quote v1.0.44
+   Compiling unicode-ident v1.0.24
+   Compiling rustix v0.38.44
+   Compiling linux-raw-sys v0.4.15
+   Compiling pin-project-lite v0.2.17
+   Compiling bitflags v2.11.0
+   Compiling bytes v1.12.1
+   Compiling cfg-if v1.0.4
+   Compiling fastrand v2.3.0
+   Compiling once_cell v1.21.3
+   Compiling syn v2.0.117
+   Compiling socket2 v0.6.5
+   Compiling mio v1.1.1
+   Compiling tempfile v3.14.0
+   Compiling tokio-macros v2.6.1
+   Compiling tokio v1.50.0
+   Compiling unix-ancillary v0.5.0 (/work)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.08s
+   Compiling unix-ancillary v0.5.0 (/work)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.22s
+     Running unittests src/lib.rs (target/debug/deps/unix_ancillary-0ea8f108e59cc8e2)
+
+running 2 tests
+test platform::tests::clamp_nofile_maps_special_and_out_of_range_values ... ok
+test platform::tests::cloexec_received_sets_flag_via_fcntl ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/async_fd.rs (target/debug/deps/async_fd-7b0e7289f7cf49ae)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/credentials.rs (target/debug/deps/credentials-375bffbea5b526c7)
+
+running 3 tests
+test fds_and_credentials_arrive_from_one_recvmsg ... ok
+test kernel_supplies_credentials_when_sender_sends_none ... ok
+test no_credentials_without_passcred ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fd_leak.rs (target/debug/deps/fd_leak-7b4fe90e832029be)
+
+running 2 tests
+test exact_receive_error_closes_all_received_fds ... ok
+test surplus_fds_dropped_not_leaked ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fd_passing.rs (target/debug/deps/fd_passing-a384e48c603197e2)
+
+running 17 tests
+test buffer_size_calculation ... ok
+test ancillary_buffer_too_small ... ok
+test datagram_payload_truncation_is_an_error ... ok
+test low_level_api ... ok
+test owned_fd_closes_on_drop ... ok
+test recv_exact_accepts_exact_count ... ok
+test recv_exact_datagram_accepts_exact_count ... ok
+test recv_exact_rejects_too_many ... ok
+test send_recv_multiple_fds ... ok
+test recv_exact_rejects_too_few ... ok
+test send_recv_single_fd ... ok
+test recv_fds_into_with_user_buffer ... ok
+test stream_allows_empty_payload_without_fds ... ok
+test partial_first_send_delivers_exactly_one_descriptor ... ok
+test stream_rejects_fds_without_payload_byte ... ok
+test send_fds_all_transfers_payload_and_descriptor ... ok
+
+running 1 test
+send to closed peer returned: Err(Os { code: 32, kind: BrokenPipe, message: "Broken pipe" })
+test send_to_closed_peer_returns_error_without_sigpipe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test send_to_closed_peer_returns_error_without_sigpipe ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vectored.rs (target/debug/deps/vectored-57c2fc787ec26bc6)
+
+running 4 tests
+test datagram_vectored_roundtrip ... ok
+test stream_vectored_allows_empty_payload_without_fds ... ok
+test stream_vectored_rejects_empty_payload_with_fds ... ok
+test stream_vectored_roundtrip_keeps_order_and_fd ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests unix_ancillary
+
+running 1 test
+test src/lib.rs - (line 50) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/unix_ancillary-7c071ef148b01a37)
+
+running 2 tests
+test platform::tests::clamp_nofile_maps_special_and_out_of_range_values ... ok
+test platform::tests::cloexec_received_sets_flag_via_fcntl ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/async_fd.rs (target/debug/deps/async_fd-a402fd2f1ac5846a)
+
+running 11 tests
+test async_datagram_payload_truncation_is_an_error ... ok
+test async_datagram_send_recv_fd ... ok
+test async_recv_exact_accepts_exact_count ... ok
+test async_recv_exact_rejects_too_few ... ok
+test async_recv_exact_datagram_accepts_exact_count ... ok
+test async_recv_exact_rejects_too_many ... ok
+test async_stream_rejects_fds_without_payload_byte ... ok
+test async_send_fds_all_transfers_payload_and_descriptor ... ok
+test async_stream_send_recv_fd ... ok
+test async_stream_surplus_fds_capped ... ok
+test async_partial_first_send_delivers_exactly_one_descriptor ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/credentials.rs (target/debug/deps/credentials-18437540d67c09a2)
+
+running 3 tests
+test fds_and_credentials_arrive_from_one_recvmsg ... ok
+test kernel_supplies_credentials_when_sender_sends_none ... ok
+test no_credentials_without_passcred ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fd_leak.rs (target/debug/deps/fd_leak-f390ad80f6ed30a6)
+
+running 2 tests
+test exact_receive_error_closes_all_received_fds ... ok
+test surplus_fds_dropped_not_leaked ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fd_passing.rs (target/debug/deps/fd_passing-176dbbd5b2ce6d95)
+
+running 17 tests
+test buffer_size_calculation ... ok
+test ancillary_buffer_too_small ... ok
+test datagram_payload_truncation_is_an_error ... ok
+test low_level_api ... ok
+test owned_fd_closes_on_drop ... ok
+test recv_exact_accepts_exact_count ... ok
+test recv_exact_datagram_accepts_exact_count ... ok
+test recv_fds_into_with_user_buffer ... ok
+test send_recv_multiple_fds ... ok
+test stream_allows_empty_payload_without_fds ... ok
+test send_recv_single_fd ... ok
+test recv_exact_rejects_too_many ... ok
+test stream_rejects_fds_without_payload_byte ... ok
+test recv_exact_rejects_too_few ... ok
+test partial_first_send_delivers_exactly_one_descriptor ... ok
+test send_fds_all_transfers_payload_and_descriptor ... ok
+
+running 1 test
+send to closed peer returned: Err(Os { code: 32, kind: BrokenPipe, message: "Broken pipe" })
+test send_to_closed_peer_returns_error_without_sigpipe ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test send_to_closed_peer_returns_error_without_sigpipe ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/vectored.rs (target/debug/deps/vectored-e6191c256f6b0aaa)
+
+running 4 tests
+test datagram_vectored_roundtrip ... ok
+test stream_vectored_allows_empty_payload_without_fds ... ok
+test stream_vectored_rejects_empty_payload_with_fds ... ok
+test stream_vectored_roundtrip_keeps_order_and_fd ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests unix_ancillary
+
+running 1 test
+test src/lib.rs - (line 50) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+    Checking pin-project-lite v0.2.17
+    Checking libc v0.2.182
+    Checking mio v1.1.1
+    Checking socket2 v0.6.5
+    Checking tokio v1.50.0
+ Documenting unix-ancillary v0.5.0 (/work)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.96s
+   Generated /work/target/doc/unix_ancillary/index.html
+error: 'cargo-clippy' is not installed for the toolchain '1.97.1-x86_64-unknown-linux-gnu'.
+help: run `rustup component add clippy` to install it

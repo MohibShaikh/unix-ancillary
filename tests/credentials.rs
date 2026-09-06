@@ -113,3 +113,23 @@ fn no_credentials_without_passcred() {
         .messages()
         .all(|m| !matches!(m, AncillaryData::Credentials(_))));
 }
+
+#[test]
+fn maximum_rights_with_automatic_credentials_stream() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    set_passcred(&rx, true).unwrap();
+    let file = std::fs::File::open("/dev/null").unwrap();
+    tx.send_fds(b"x", &[&file; 253]).unwrap();
+    assert_eq!(rx.recv_fds_exact::<253>().unwrap().fds.len(), 253);
+}
+
+#[test]
+fn maximum_rights_with_automatic_credentials_datagram() {
+    use std::os::unix::net::UnixDatagram;
+    use unix_ancillary::UnixDatagramExt;
+    let (tx, rx) = UnixDatagram::pair().unwrap();
+    set_passcred(&rx, true).unwrap();
+    let file = std::fs::File::open("/dev/null").unwrap();
+    tx.send_fds(b"x", &[&file; 253]).unwrap();
+    assert_eq!(rx.recv_fds_exact::<253>().unwrap().fds.len(), 253);
+}

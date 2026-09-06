@@ -1,0 +1,243 @@
+{
+  "checked_on": "2026-09-05",
+  "head": "bed5bd7",
+  "crates": [
+    {
+      "name": "unix-ancillary",
+      "downloads": 1670,
+      "recent_downloads": 1601,
+      "latest": "0.5.0",
+      "reverse_dependencies": 1,
+      "sources": [
+        "https://crates.io/api/v1/crates/unix-ancillary",
+        "https://crates.io/api/v1/crates/unix-ancillary/reverse_dependencies?page=1&per_page=100"
+      ]
+    },
+    {
+      "name": "sendfd",
+      "downloads": 15378189,
+      "recent_downloads": 2596197,
+      "latest": "0.4.4",
+      "reverse_dependencies": 14,
+      "sources": [
+        "https://crates.io/api/v1/crates/sendfd",
+        "https://crates.io/api/v1/crates/sendfd/reverse_dependencies?page=1&per_page=100"
+      ]
+    },
+    {
+      "name": "uds",
+      "downloads": 9771253,
+      "recent_downloads": 1461189,
+      "latest": "0.4.2",
+      "reverse_dependencies": 10,
+      "sources": [
+        "https://crates.io/api/v1/crates/uds",
+        "https://crates.io/api/v1/crates/uds/reverse_dependencies?page=1&per_page=100"
+      ]
+    },
+    {
+      "name": "ipc-channel",
+      "downloads": 6069152,
+      "recent_downloads": 937801,
+      "latest": "0.23.0",
+      "reverse_dependencies": 54,
+      "sources": [
+        "https://crates.io/api/v1/crates/ipc-channel",
+        "https://crates.io/api/v1/crates/ipc-channel/reverse_dependencies?page=1&per_page=100"
+      ]
+    },
+    {
+      "name": "fd-queue",
+      "downloads": 14150,
+      "recent_downloads": 148,
+      "latest": "1.1.0",
+      "reverse_dependencies": 1,
+      "sources": [
+        "https://crates.io/api/v1/crates/fd-queue",
+        "https://crates.io/api/v1/crates/fd-queue/reverse_dependencies?page=1&per_page=100"
+      ]
+    },
+    {
+      "name": "tokio-seqpacket",
+      "downloads": 4413988,
+      "recent_downloads": 1254693,
+      "latest": "0.9.1",
+      "reverse_dependencies": 4,
+      "sources": [
+        "https://crates.io/api/v1/crates/tokio-seqpacket",
+        "https://crates.io/api/v1/crates/tokio-seqpacket/reverse_dependencies?page=1&per_page=100"
+      ]
+    }
+  ],
+  "unix_ancillary_daily": {
+    "2026-06-09": 2,
+    "2026-06-12": 2,
+    "2026-06-14": 2,
+    "2026-06-16": 2,
+    "2026-06-17": 1,
+    "2026-06-19": 2,
+    "2026-06-20": 3,
+    "2026-06-21": 4,
+    "2026-06-23": 3,
+    "2026-06-24": 4,
+    "2026-06-25": 2,
+    "2026-06-26": 1,
+    "2026-06-28": 2,
+    "2026-06-29": 3,
+    "2026-07-01": 1,
+    "2026-07-04": 2,
+    "2026-07-05": 3,
+    "2026-07-06": 2,
+    "2026-07-08": 1,
+    "2026-07-09": 1,
+    "2026-07-10": 1,
+    "2026-07-11": 5,
+    "2026-07-12": 1,
+    "2026-07-13": 2,
+    "2026-07-14": 1,
+    "2026-07-15": 2,
+    "2026-07-17": 4,
+    "2026-07-19": 2,
+    "2026-07-20": 26,
+    "2026-07-21": 25,
+    "2026-07-22": 32,
+    "2026-07-23": 8,
+    "2026-07-24": 1,
+    "2026-07-25": 1,
+    "2026-07-26": 2,
+    "2026-07-28": 4,
+    "2026-07-29": 1,
+    "2026-07-31": 1,
+    "2026-08-02": 1,
+    "2026-08-03": 2,
+    "2026-08-05": 5,
+    "2026-08-06": 3,
+    "2026-08-07": 2,
+    "2026-08-08": 2,
+    "2026-08-09": 2,
+    "2026-08-10": 6,
+    "2026-08-11": 3,
+    "2026-08-12": 2,
+    "2026-08-13": 4,
+    "2026-08-14": 6,
+    "2026-08-15": 12,
+    "2026-08-16": 16,
+    "2026-08-17": 48,
+    "2026-08-18": 16,
+    "2026-08-19": 10,
+    "2026-08-20": 9,
+    "2026-08-21": 4,
+    "2026-08-22": 4,
+    "2026-08-23": 3,
+    "2026-08-24": 9,
+    "2026-08-25": 5,
+    "2026-08-26": 6,
+    "2026-08-27": 8,
+    "2026-08-28": 10,
+    "2026-08-29": 7,
+    "2026-08-30": 104,
+    "2026-08-31": 116,
+    "2026-09-01": 322,
+    "2026-09-02": 194,
+    "2026-09-03": 181,
+    "2026-09-04": 190,
+    "2026-09-05": 164
+  },
+  "daily_source": "https://crates.io/api/v1/crates/unix-ancillary/downloads",
+  "published_dependent": {
+    "dependencies": [
+      {
+        "id": 35305398,
+        "version_id": 3144390,
+        "crate_id": "unix-ancillary",
+        "req": "^0.4.0",
+        "optional": false,
+        "default_features": true,
+        "features": [
+          "tokio"
+        ],
+        "target": null,
+        "kind": "normal",
+        "downloads": 35
+      }
+    ],
+    "versions": [
+      {
+        "id": 3144390,
+        "crate": "runner-systemd-nspawn",
+        "num": "0.1.4",
+        "dl_path": "/api/v1/crates/runner-systemd-nspawn/0.1.4/download",
+        "readme_path": "/api/v1/crates/runner-systemd-nspawn/0.1.4/readme",
+        "updated_at": "2026-09-03T14:32:10.533062Z",
+        "created_at": "2026-09-03T14:32:10.533062Z",
+        "downloads": 12,
+        "features": {},
+        "yanked": false,
+        "yank_message": null,
+        "lib_links": null,
+        "license": "AGPL-3.0-or-later",
+        "links": {
+          "dependencies": "/api/v1/crates/runner-systemd-nspawn/0.1.4/dependencies",
+          "version_downloads": "/api/v1/crates/runner-systemd-nspawn/0.1.4/downloads",
+          "authors": "/api/v1/crates/runner-systemd-nspawn/0.1.4/authors"
+        },
+        "crate_size": 64332,
+        "published_by": {
+          "id": 6210,
+          "login": "mfenniak",
+          "name": "Mathieu Fenniak",
+          "avatar": "https://avatars.githubusercontent.com/u/91093?v=4",
+          "url": "https://github.com/mfenniak",
+          "github_username_matches": true,
+          "created_at": "2009-06-02T16:42:13Z"
+        },
+        "audit_actions": [
+          {
+            "action": "publish",
+            "user": {
+              "id": 6210,
+              "login": "mfenniak",
+              "name": "Mathieu Fenniak",
+              "avatar": "https://avatars.githubusercontent.com/u/91093?v=4",
+              "url": "https://github.com/mfenniak",
+              "github_username_matches": true,
+              "created_at": "2009-06-02T16:42:13Z"
+            },
+            "time": "2026-09-03T14:32:10.533062Z"
+          }
+        ],
+        "checksum": "7032826fea70c1380dbc24f97f53af2abc5cf204f82bb7a7fe0f3738596abfc3",
+        "rust_version": null,
+        "has_lib": false,
+        "bin_names": [
+          "runner-systemd-nspawn"
+        ],
+        "edition": "2024",
+        "description": "Plugin for forgejo-runner, allowing running jobs in systemd-nspawn containers",
+        "homepage": null,
+        "documentation": null,
+        "repository": "https://codeberg.org/mfenniak/runner-systemd-nspawn",
+        "trustpub_data": null,
+        "linecounts": {
+          "languages": {
+            "Rust": {
+              "code_lines": 2065,
+              "comment_lines": 176,
+              "files": 7
+            },
+            "Shell": {
+              "code_lines": 15,
+              "comment_lines": 7,
+              "files": 1
+            }
+          },
+          "total_code_lines": 2080,
+          "total_comment_lines": 183
+        }
+      }
+    ],
+    "meta": {
+      "total": 1
+    }
+  }
+}

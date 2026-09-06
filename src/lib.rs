@@ -7,35 +7,27 @@
 //!
 //! - **No `RawFd` in the public API** — `OwnedFd` and `BorrowedFd` only.
 //! - **Automatic cleanup** — received fds are `OwnedFd`, closed on drop.
-//! - **No fd leaks on truncation** — the high-level API sizes the receive
-//!   cmsg buffer past every Unix kernel's per-message fd cap, so the kernel
-//!   cannot deliver more fds than we can wrap. Surplus fds beyond the
-//!   caller's `N` are wrapped in `OwnedFd` and closed automatically.
+//! - **Ownership on receive** — descriptors are owned before the receive
+//!   function returns. Low-level buffers close unread descriptors on clear,
+//!   reuse or drop; message iterators close unconsumed descriptors on drop.
 //! - **CLOEXEC errors are surfaced** — on platforms without
-//!   `MSG_CMSG_CLOEXEC` (notably macOS) we set `FD_CLOEXEC` post-recv; if
-//!   that fails, every received fd is closed and the error is returned.
+//!   `MSG_CMSG_CLOEXEC` (notably macOS), a failed `fcntl` closes the whole batch.
 //!
-//! # Truncation safety
+//! # Truncation policy
 //!
-//! The high-level [`UnixStreamExt::recv_fds`] / [`UnixDatagramExt::recv_fds`]
-//! size the receive cmsg buffer to a platform-specific upper bound the kernel
-//! cannot exceed for a single `SCM_RIGHTS` message:
+//! Convenience receives reject ancillary truncation and datagram payload
+//! truncation with `InvalidData`, closing every descriptor delivered in the
+//! control buffer. Linux/Android reserve room for 253 descriptors plus sender
+//! credentials. BSD uses a 253-descriptor receive budget; this is not a claim
+//! about every BSD kernel's maximum. macOS uses a bounded `RLIMIT_NOFILE`
+//! estimate. Additional control messages or platform limits can still cause
+//! truncation; callers must handle the error.
 //!
-//! - **Linux / *BSD**: fixed `SCM_MAX_FD = 253`. The peer's kernel rejects
-//!   oversized sends with `EINVAL`.
-//! - **macOS**: the receiver's current `RLIMIT_NOFILE`, queried per recv
-//!   call. The kernel must allocate an fd table entry per delivered fd and
-//!   cannot exceed that limit.
-//!
-//! Result: truncation is kernel-impossible. Every fd the kernel delivers
-//! becomes an `OwnedFd` we control. Surplus fds beyond the caller's `N`
-//! are closed automatically. If the kernel still reports `MSG_CTRUNC`
-//! (defensive path; unreachable in practice), every fd we extracted is
-//! closed and an error is returned.
-//!
-//! Low-level callers using [`SocketAncillary`] manage their own buffer and
-//! must size it appropriately — the [`is_truncated`](SocketAncillary::is_truncated)
-//! flag is exposed for that path.
+//! Low-level [`cmsg_recvmsg`] exposes truncation flags and owns the delivered
+//! descriptors even when truncated. Size [`SocketAncillary`] for the messages
+//! your protocol accepts, then drain [`SocketAncillary::messages`] once.
+//! Platform handling of descriptors omitted from the control buffer is a
+//! kernel responsibility; this crate cannot close descriptors it cannot observe.
 //!
 //! # CLOEXEC race on macOS
 //!
@@ -87,6 +79,7 @@
 //!   internally on `EINTR`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+#![doc = include_str!("../MIGRATION.md")]
 
 #[cfg(not(unix))]
 compile_error!("unix-ancillary only supports Unix platforms");
@@ -135,12 +128,21 @@ pub fn cmsg_sendmsg(
     iov: &[io::IoSlice<'_>],
     ancillary: &SocketAncillary<'_>,
 ) -> io::Result<usize> {
+    if ancillary.receive_mode {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "clear the receive buffer before building a send",
+        ));
+    }
     cmsg::sendmsg_vectored(fd, iov, ancillary.buffer, ancillary.length)
 }
 
 /// Receive data with ancillary control messages from a Unix socket.
 ///
 /// Low-level API. Prefer [`UnixStreamExt::recv_fds`] for convenience.
+/// Previously unread descriptors are closed before attempting this receive,
+/// including when it returns an error. On success, use
+/// [`SocketAncillary::messages`] to drain the newly owned descriptors.
 ///
 /// On non-`MSG_CMSG_CLOEXEC` platforms, all received fds have `FD_CLOEXEC`
 /// set before this function returns. If that fails for any fd, every
@@ -150,7 +152,10 @@ pub fn cmsg_recvmsg(
     iov: &mut [io::IoSliceMut<'_>],
     ancillary: &mut SocketAncillary<'_>,
 ) -> io::Result<RecvResult> {
+    ancillary.clear();
+    ancillary.receive_mode = true;
     let result = cmsg::recvmsg_vectored(fd, iov, ancillary.buffer)?;
+    ancillary.received = result.messages;
     ancillary.length = result.ancillary_len;
     ancillary.truncated = result.ancillary_truncated;
     Ok(RecvResult {

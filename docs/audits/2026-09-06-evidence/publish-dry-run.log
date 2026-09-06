@@ -1,0 +1,10 @@
+    Updating crates.io index
+   Packaging unix-ancillary v0.6.0 (/work)
+    Updating crates.io index
+    Packaged 28 files, 142.2KiB (36.8KiB compressed)
+   Verifying unix-ancillary v0.6.0 (/work)
+   Compiling libc v0.2.182
+   Compiling unix-ancillary v0.6.0 (/work/target/package/unix-ancillary-0.6.0)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.17s
+   Uploading unix-ancillary v0.6.0 (/work)
+warning: aborting upload due to dry run

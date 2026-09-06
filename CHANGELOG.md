@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.6.0] - Unreleased
+
+### Safety fixes and migration
+
+- Low-level send buffers retain descriptor borrows. Dropping the original file
+  before the buffer is no longer accepted; stale fd-number reuse cannot change
+  the resource sent. Send buffers never yield received descriptor owners.
+- `SocketAncillary::messages` now takes `&mut self` and drains received messages
+  once. Received descriptors are owned before receive returns. Unread
+  descriptors close on buffer clear/reuse/drop and iterator drop, including
+  early error paths. A failed receive clears the previous message state.
+- Receive buffers reject send operations until cleared. Forward descriptors
+  by draining them and borrowing them into a separate send buffer.
+- Control headers are parsed and written without aligned references, so caller
+  byte slices at arbitrary offsets are supported. The fuzz parser no longer
+  constructs owning descriptors from arbitrary integers.
+- Linux/Android convenience buffers include space for automatic credentials
+  alongside 253 FDs. Ancillary truncation now returns `InvalidData`, closing
+  the delivered batch. Other additional cmsgs can still cause truncation.
+
+These are low-level source and behavior changes. High-level blocking/Tokio FD
+operation signatures and Rust 1.75 MSRV are retained. See [MIGRATION.md](MIGRATION.md).
+
+### Verification and adoption
+
+- Regression coverage for descriptor ownership, early cleanup, offset buffers,
+  lifetime rejection, and maximum-sized credential/FD receives.
+- Restored the separate fuzz workspace and added its compile check to CI.
+- Added a real parent/child read-only handoff example; fixed the capability
+  example to send a read-only descriptor and verify that writes fail.
+- CI runs the multiprocess and downstream call-shape examples and checks
+  Tokio compilation on the MSRV.
+- Corrected comparisons, platform/truncation claims, and the vectored API
+  inventory: async datagram vectored methods are not implemented.
+
 ## [0.5.0] - 2026-09-03
 
 ### Breaking
@@ -25,8 +60,9 @@
   stabilizes. Taking `AsFd` also covers tokio sockets and bare `OwnedFd`.
 - `SocketAncillary::add_credentials` and `buffer_size_for_credentials`, so one
   message can carry descriptors and credentials together.
-- `send_fds_vectored` and `recv_fds_vectored` on all four extension traits,
-  blocking and tokio. Descriptors ride the same `sendmsg` as the whole iovec,
+- `send_fds_vectored` and `recv_fds_vectored` on the blocking stream/datagram
+  traits and the Tokio stream trait. (Corrected inventory: the original entry
+  incorrectly claimed all four traits.) Descriptors ride the same `sendmsg` as the whole iovec,
   so a framed protocol sends header and body without copying them into one
   buffer first. The stream empty-payload rule is checked against the total
   length across `iov`, not per buffer.

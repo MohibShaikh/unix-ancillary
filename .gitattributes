@@ -1,0 +1,2 @@
+# Preserve verbatim audit stdout, including test-runner trailing spaces.
+docs/audits/*/*.log -whitespace

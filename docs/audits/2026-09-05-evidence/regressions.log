@@ -1,0 +1,88 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded bitflags v2.11.0
+  Downloaded fastrand v2.3.0
+  Downloaded cfg-if v1.0.4
+  Downloaded bytes v1.12.1
+  Downloaded errno v0.3.14
+  Downloaded mio v1.1.1
+  Downloaded quote v1.0.44
+  Downloaded proc-macro2 v1.0.106
+  Downloaded tokio-macros v2.6.1
+  Downloaded once_cell v1.21.3
+  Downloaded pin-project-lite v0.2.17
+  Downloaded socket2 v0.6.5
+  Downloaded unicode-ident v1.0.24
+  Downloaded tempfile v3.14.0
+  Downloaded rustix v0.38.44
+  Downloaded syn v2.0.117
+  Downloaded libc v0.2.182
+  Downloaded tokio v1.50.0
+  Downloaded linux-raw-sys v0.4.15
+   Compiling proc-macro2 v1.0.106
+   Compiling libc v0.2.182
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.44
+   Compiling rustix v0.38.44
+   Compiling linux-raw-sys v0.4.15
+   Compiling bitflags v2.11.0
+   Compiling pin-project-lite v0.2.17
+   Compiling cfg-if v1.0.4
+   Compiling fastrand v2.3.0
+   Compiling bytes v1.12.1
+   Compiling once_cell v1.21.3
+   Compiling syn v2.0.117
+   Compiling socket2 v0.6.5
+   Compiling mio v1.1.1
+   Compiling unix-ancillary v0.5.0 (/work)
+   Compiling tempfile v3.14.0
+   Compiling tokio-macros v2.6.1
+   Compiling tokio v1.50.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.12s
+     Running tests/audit_regressions.rs (target/debug/deps/audit_regressions-7a9f233ecec53a28)
+
+running 6 tests
+test dropping_unread_receive_buffer_must_close_fds ... 
+thread 'dropping_unread_receive_buffer_must_close_fds' (507) panicked at tests/audit_regressions.rs:57:5:
+assertion `left == right` failed: unconsumed received fds leaked
+  left: 11
+ right: 7
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test high_level_without_passcred_is_control ... ok
+test legal_maximum_fd_message_with_passcred_must_succeed ... 
+thread 'legal_maximum_fd_message_with_passcred_must_succeed' (509) panicked at tests/audit_regressions.rs:67:5:
+legal message rejected: Err(Custom { kind: Other, error: "ancillary truncated despite oversized buffer; possible fd leak — abort the connection" })
+FAILED
+test received_fd_must_not_have_two_owners ... 
+thread 'received_fd_must_not_have_two_owners' (510) panicked at tests/audit_regressions.rs:39:5:
+two OwnedFd values own fd 10
+FAILED
+test send_buffer_must_not_own_borrowed_fd ... 
+thread 'send_buffer_must_not_own_borrowed_fd' (511) panicked at tests/audit_regressions.rs:23:5:
+borrowed caller fd was closed: Err(Os { code: 9, kind: Uncategorized, message: "Bad file descriptor" })
+FAILED
+test unaligned_safe_buffer_must_not_abort ... 
+running 1 test
+
+thread 'unaligned_safe_buffer_must_not_abort' (514) panicked at src/ancillary.rs:320:13:
+misaligned pointer dereference: address must be a multiple of 0x8 but is 0x7d1db0000cb1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread caused non-unwinding panic. aborting.
+
+thread 'unaligned_safe_buffer_must_not_abort' (512) panicked at tests/audit_regressions.rs:83:5:
+safe unaligned slice aborted child: signal: 6 (SIGABRT) (core dumped)
+FAILED
+
+failures:
+
+failures:
+    dropping_unread_receive_buffer_must_close_fds
+    legal_maximum_fd_message_with_passcred_must_succeed
+    received_fd_must_not_have_two_owners
+    send_buffer_must_not_own_borrowed_fd
+    unaligned_safe_buffer_must_not_abort
+
+test result: FAILED. 1 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `--test audit_regressions`

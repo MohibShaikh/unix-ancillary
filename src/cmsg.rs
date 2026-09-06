@@ -9,6 +9,7 @@ pub(crate) struct RecvMsgResult {
     pub ancillary_len: usize,
     pub ancillary_truncated: bool,
     pub data_truncated: bool,
+    pub messages: Vec<crate::ancillary::ReceivedMessage>,
 }
 
 /// Send ordinary bytes without ancillary data, using the same signal-safe
@@ -91,14 +92,17 @@ pub(crate) fn recvmsg_vectored(
     let ancillary_truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
     let data_truncated = (msg.msg_flags & libc::MSG_TRUNC) != 0;
 
-    // On non-CLOEXEC platforms, set the flag now. If this fails, the helper
-    // closes every fd it found before returning the error.
-    platform::cloexec_received(&ancillary_buf[..ancillary_len])?;
+    // SAFETY: this is fresh, kernel-produced recvmsg output, consumed once.
+    // Establish ownership before fallible CLOEXEC processing so an error drops
+    // every delivered descriptor, including those not yet processed.
+    let messages = unsafe { crate::ancillary::take_received(&ancillary_buf[..ancillary_len]) };
+    platform::cloexec_received(&messages)?;
 
     Ok(RecvMsgResult {
         bytes_read: ret as usize,
         ancillary_len,
         ancillary_truncated,
         data_truncated,
+        messages,
     })
 }

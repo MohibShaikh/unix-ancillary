@@ -2,7 +2,7 @@ use std::io;
 use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::{UnixDatagram, UnixStream};
 
-use crate::ancillary::{AncillaryData, SocketAncillary};
+use crate::ancillary::{ReceivedMessage, SocketAncillary};
 use crate::cmsg;
 use crate::platform;
 
@@ -93,18 +93,9 @@ pub(crate) fn iov_len(iov: &[io::IoSlice<'_>]) -> usize {
 
 /// Receive into `data_buf`, capping fds returned to the caller at `N`.
 ///
-/// The internal cmsg buffer is sized to a platform-specific upper bound that
-/// the kernel cannot exceed for a single `SCM_RIGHTS` message:
-///
-/// - Linux / *BSD: a fixed `SCM_MAX_FD = 253` per-message cap.
-/// - macOS: the receiver's current `RLIMIT_NOFILE`, since the kernel must
-///   allocate an fd table entry per delivered fd and cannot deliver more
-///   than the receiver can hold.
-///
-/// Truncation is therefore kernel-impossible. Surplus fds beyond `N` are
-/// wrapped in `OwnedFd` and dropped before returning, closing them. If the
-/// kernel still reports `MSG_CTRUNC` (defensive — should be unreachable),
-/// every fd we extracted is closed and an error is returned.
+/// The ancillary budget covers Linux's 253-fd limit plus automatic credentials.
+/// BSD uses the same fd budget; macOS uses a bounded RLIMIT_NOFILE estimate.
+/// Any reported truncation is an error, closing all delivered descriptors.
 pub(crate) fn recv_fds_into_impl(
     fd: BorrowedFd<'_>,
     data_buf: &mut [u8],
@@ -122,39 +113,34 @@ pub(crate) fn recv_fds_into_vectored_impl(
     mode: CountMode,
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
     let cap = mode.count().max(platform::max_recv_fds());
-    let mut anc_buf = vec![0u8; SocketAncillary::buffer_size_for_rights(cap)];
+    let size = SocketAncillary::buffer_size_for_rights(cap);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let size = size
+        .checked_add(SocketAncillary::buffer_size_for_credentials())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ancillary buffer size overflow",
+            )
+        })?;
+    let mut anc_buf = vec![0u8; size];
 
     let result = cmsg::recvmsg_vectored(fd, iov, &mut anc_buf)?;
 
-    let ancillary = SocketAncillary {
-        buffer: &mut anc_buf,
-        length: result.ancillary_len,
-        truncated: result.ancillary_truncated,
-    };
-
-    // Wrap every fd the kernel handed us. Surplus past the mode are dropped
-    // at function exit, closing them and preventing leaks.
     let mut all_fds: Vec<OwnedFd> = Vec::new();
-    for msg in ancillary.messages() {
-        // This function exists to collect descriptors. The credentials arm is
-        // cfg'd rather than a wildcard: on a target without it the enum has one
-        // variant and `if let` would be irrefutable, which is denied here.
-        match msg {
-            AncillaryData::ScmRights(rights) => all_fds.extend(rights),
+    for message in result.messages {
+        match message {
+            ReceivedMessage::Rights(fds) => all_fds.extend(fds),
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            AncillaryData::Credentials(_) => {}
+            ReceivedMessage::Credentials(_) => {}
         }
     }
 
     if result.ancillary_truncated {
-        // Defensive path: should be unreachable because `cap` exceeds
-        // every kernel's per-message fd limit. If we land here, fds may
-        // have been deposited beyond our buffer (macOS) and we cannot
-        // reach them. Drop everything we DID receive and surface the
-        // error so the caller knows the connection state is suspect.
         drop(all_fds);
-        return Err(io::Error::other(
-            "ancillary truncated despite oversized buffer; possible fd leak — abort the connection",
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ancillary data truncated; discard the incomplete message",
         ));
     }
 

@@ -1,0 +1,98 @@
+info: downloading component clippy
+info: downloading component rustfmt
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded fastrand v2.3.0
+  Downloaded cfg-if v1.0.4
+  Downloaded errno v0.3.14
+  Downloaded pin-project-lite v0.2.17
+  Downloaded tokio-macros v2.6.1
+  Downloaded quote v1.0.44
+  Downloaded bitflags v2.11.0
+  Downloaded once_cell v1.21.3
+  Downloaded tempfile v3.14.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded unicode-ident v1.0.24
+  Downloaded socket2 v0.6.5
+  Downloaded bytes v1.12.1
+  Downloaded mio v1.1.1
+  Downloaded syn v2.0.117
+  Downloaded rustix v0.38.44
+  Downloaded libc v0.2.182
+  Downloaded tokio v1.50.0
+  Downloaded linux-raw-sys v0.4.15
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.182
+   Compiling quote v1.0.44
+   Compiling rustix v0.38.44
+    Checking bytes v1.12.1
+    Checking pin-project-lite v0.2.17
+    Checking bitflags v2.11.0
+    Checking linux-raw-sys v0.4.15
+    Checking fastrand v2.3.0
+    Checking once_cell v1.21.3
+    Checking cfg-if v1.0.4
+   Compiling syn v2.0.117
+    Checking socket2 v0.6.5
+    Checking mio v1.1.1
+    Checking tempfile v3.14.0
+   Compiling tokio-macros v2.6.1
+    Checking tokio v1.50.0
+    Checking unix-ancillary v0.5.0 (/work)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.35s
+Sending file descriptor...
+Receiving file descriptor...
+Received 13 bytes: "here's a file"
+Received 1 fd(s)
+File contents via received fd: "Hello from the other side!"
+[privileged] bound 127.0.0.1:45235, handing the listening socket to worker
+[worker] received the listening socket, now serving on 127.0.0.1:45235 (never called bind() itself)
+Sending file descriptor...
+Receiving file descriptor...
+Received 13 bytes: "here's a file"
+Received 1 fd(s)
+File contents via received fd: "Hello from an async fd!"
+[supervisor] granting one read-only capability to the sandbox
+[sandbox] used the granted capability, read: "data the sandboxed agent is allowed to read"
+    Updating crates.io index
+     Locking 1 package to latest compatible version
+    Updating unix-ancillary v0.2.2 (/work) -> v0.5.0
+ Downloading crates ...
+  Downloaded jobserver v0.1.34
+  Downloaded arbitrary v1.4.2
+  Downloaded shlex v1.3.0
+  Downloaded find-msvc-tools v0.1.9
+  Downloaded cc v1.2.61
+  Downloaded libfuzzer-sys v0.4.12
+  Downloaded libc v0.2.186
+   Compiling libc v0.2.186
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+    Checking arbitrary v1.4.2
+    Checking unix-ancillary v0.5.0 (/work)
+   Compiling jobserver v0.1.34
+   Compiling cc v1.2.61
+   Compiling libfuzzer-sys v0.4.12
+    Checking unix-ancillary-fuzz v0.0.0 (/work/fuzz)
+error[E0004]: non-exhaustive patterns: `_` not covered
+  --> fuzz_targets/parse_cmsg.rs:27:15
+   |
+27 |         match msg {
+   |               ^^^ pattern `_` not covered
+   |
+note: `unix_ancillary::AncillaryData<'_>` defined here
+  --> /work/src/ancillary.rs:22:1
+   |
+22 | pub enum AncillaryData<'a> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: the matched value is of type `unix_ancillary::AncillaryData<'_>`
+   = note: `unix_ancillary::AncillaryData<'_>` is marked as non-exhaustive, so a wildcard `_` is necessary to match exhaustively
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+   |
+41 ~             },
+42 +             _ => todo!()
+   |
+
+For more information about this error, try `rustc --explain E0004`.
+error: could not compile `unix-ancillary-fuzz` (bin "parse_cmsg") due to 1 previous error

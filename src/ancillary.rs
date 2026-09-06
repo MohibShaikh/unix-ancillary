@@ -2,260 +2,231 @@ use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::{fmt, mem};
 
-/// Error returned when the ancillary buffer is too small.
+/// The ancillary buffer is too small, or must be cleared before building a send.
 #[derive(Debug, Clone)]
 pub struct AncillaryError;
 
 impl fmt::Display for AncillaryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ancillary buffer too small")
+        write!(f, "ancillary buffer too small or not cleared after receive")
     }
 }
-
 impl std::error::Error for AncillaryError {}
 
 /// Received ancillary data from a Unix socket.
-///
-/// Non-exhaustive: matching must carry a wildcard arm. Future control-message
-/// kinds are added here, and marking it now keeps that additive.
 #[non_exhaustive]
 pub enum AncillaryData<'a> {
-    /// File descriptors received via `SCM_RIGHTS`.
+    /// Owned descriptors. Unconsumed descriptors close when the iterator drops.
     ScmRights(ScmRights<'a>),
-    /// Sender credentials received via `SCM_CREDENTIALS`.
-    ///
-    /// Only arrives on a socket with `SO_PASSCRED` set. See
-    /// [`set_passcred`](crate::set_passcred).
+    /// Kernel-validated sender credentials; requires [`crate::set_passcred`].
     #[cfg(any(target_os = "linux", target_os = "android"))]
     Credentials(crate::ScmCredentials),
 }
 
-/// Iterator over file descriptors received via `SCM_RIGHTS`.
-///
-/// Each yielded `OwnedFd` takes ownership of one received descriptor and
-/// closes it on drop.
-///
-/// # Important
-///
-/// Iterate this exactly once. Iterating the same `Messages`/`ScmRights` view
-/// twice would manufacture two `OwnedFd`s for the same raw fd, leading to a
-/// double-close.
+/// Draining iterator over received descriptors. Each descriptor is yielded once.
+/// Dropping this iterator closes every descriptor not yet yielded.
 pub struct ScmRights<'a> {
-    data: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> ScmRights<'a> {
-    pub(crate) fn new(data: &'a [u8]) -> Self {
-        ScmRights { data, offset: 0 }
-    }
+    inner: std::vec::IntoIter<OwnedFd>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl Iterator for ScmRights<'_> {
     type Item = OwnedFd;
-
     fn next(&mut self) -> Option<Self::Item> {
-        let fd_size = mem::size_of::<RawFd>();
-        loop {
-            if self.offset + fd_size > self.data.len() {
-                return None;
-            }
-            let mut fd_bytes = [0u8; mem::size_of::<RawFd>()];
-            fd_bytes.copy_from_slice(&self.data[self.offset..self.offset + fd_size]);
-            self.offset += fd_size;
-            let raw = RawFd::from_ne_bytes(fd_bytes);
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
 
-            // The kernel never delivers negative fd values via SCM_RIGHTS;
-            // any negative is malformed input. Skip silently rather than
-            // tripping `OwnedFd::from_raw_fd`'s precondition (which panics
-            // under debug assertions and is UB to violate).
-            if raw < 0 {
-                continue;
-            }
+pub(crate) enum ReceivedMessage {
+    Rights(Vec<OwnedFd>),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Credentials(crate::ScmCredentials),
+}
 
-            // SAFETY: the kernel just delivered this fd to us via recvmsg
-            // SCM_RIGHTS; we wrap it in OwnedFd immediately and the caller
-            // owns it from this point. Caller MUST iterate exactly once —
-            // see type docs.
-            return Some(unsafe { OwnedFd::from_raw_fd(raw) });
+impl ReceivedMessage {
+    pub(crate) fn fds(&self) -> &[OwnedFd] {
+        match self {
+            Self::Rights(fds) => fds,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Credentials(_) => &[],
         }
     }
 }
 
-/// Iterator over control messages in an ancillary buffer.
+/// Drains received control messages. Dropping it closes unconsumed descriptors.
 pub struct Messages<'a> {
-    current: *const libc::cmsghdr,
-    msg: libc::msghdr,
-    _marker: PhantomData<&'a [u8]>,
-}
-
-impl<'a> Messages<'a> {
-    fn new(buffer: &'a [u8], length: usize) -> Self {
-        // SAFETY: zeroed msghdr followed by explicit field init.
-        let mut msg: libc::msghdr = unsafe { mem::zeroed() };
-        msg.msg_control = buffer.as_ptr() as *mut libc::c_void;
-        msg.msg_controllen = length as _;
-
-        // SAFETY: msg.msg_control points at `buffer` for `length` bytes;
-        // CMSG_FIRSTHDR walks that region per the cmsg(3) contract.
-        let current = unsafe { libc::CMSG_FIRSTHDR(&msg) };
-
-        Messages {
-            current,
-            msg,
-            _marker: PhantomData,
-        }
-    }
+    inner: std::vec::Drain<'a, ReceivedMessage>,
 }
 
 impl<'a> Iterator for Messages<'a> {
     type Item = AncillaryData<'a>;
-
     fn next(&mut self) -> Option<Self::Item> {
-        // Loop instead of recursing on unknown cmsg types: an adversarial
-        // peer could otherwise force unbounded recursion.
-        loop {
-            if self.current.is_null() {
-                return None;
-            }
-
-            // Compute buffer bounds once. Used to validate cmsg_len before
-            // calling CMSG_NXTHDR, which performs unchecked pointer
-            // arithmetic on (corrupted) cmsg_len in libc and would otherwise
-            // overflow on malformed input. Buffers reaching us from
-            // `recvmsg` are kernel-formatted, but defending against bogus
-            // input is cheap and protects fuzz/test/replay use cases.
-            let buf_start = self.msg.msg_control as usize;
-            #[allow(clippy::unnecessary_cast)]
-            let buf_end = buf_start.saturating_add(self.msg.msg_controllen as usize);
-            let cur_addr = self.current as usize;
-
-            // SAFETY: `current` is non-null and points inside the borrowed
-            // buffer (guaranteed by CMSG_FIRSTHDR/CMSG_NXTHDR contract);
-            // reading the header is sound.
-            #[allow(clippy::unnecessary_cast)]
-            // cmsg_len is size_t on Linux but socklen_t (u32) elsewhere
-            let (level, ty, data_ptr, data_len, well_formed) = unsafe {
-                let cmsg = &*self.current;
-                let data_ptr = libc::CMSG_DATA(self.current as *mut _);
-                let header_len = (data_ptr as usize).saturating_sub(cur_addr);
-                let total = cmsg.cmsg_len as usize;
-
-                // Bound `total` to the bytes remaining in the buffer from
-                // this cmsg's start. Anything claiming to extend past the
-                // buffer is malformed; we treat its data area as empty and
-                // refuse to walk further.
-                let remaining = buf_end.saturating_sub(cur_addr);
-                let well_formed = total >= header_len && total <= remaining;
-                let data_len = if well_formed { total - header_len } else { 0 };
-
-                (
-                    cmsg.cmsg_level,
-                    cmsg.cmsg_type,
-                    data_ptr,
-                    data_len,
-                    well_formed,
-                )
-            };
-
-            // Advance only if the current cmsg is well-formed: libc's
-            // CMSG_NXTHDR reads cmsg_len from the cmsghdr directly and would
-            // overflow pointer arithmetic on a corrupted value. If
-            // malformed, terminate the walk after handling the current
-            // entry's data slice.
-            self.current = if well_formed {
-                // SAFETY: cmsg_len fits in the buffer; CMSG_NXTHDR will
-                // either return a valid in-buffer pointer or null.
-                unsafe { libc::CMSG_NXTHDR(&self.msg, self.current) }
-            } else {
-                std::ptr::null()
-            };
-
-            if level == libc::SOL_SOCKET && ty == libc::SCM_RIGHTS {
-                // SAFETY: data_ptr is in-buffer; data_len is bounded by
-                // the buffer end via the well-formed check above. Lifetime
-                // ties to the buffer borrowed by Messages<'a>.
-                let data: &'a [u8] = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
-                return Some(AncillaryData::ScmRights(ScmRights::new(data)));
-            }
-
+        self.inner.next().map(|message| match message {
+            ReceivedMessage::Rights(fds) => AncillaryData::ScmRights(ScmRights {
+                inner: fds.into_iter(),
+                _marker: PhantomData,
+            }),
             #[cfg(any(target_os = "linux", target_os = "android"))]
-            if level == libc::SOL_SOCKET
-                && ty == libc::SCM_CREDENTIALS
-                && data_len >= crate::ScmCredentials::SIZE
-            {
-                // SAFETY: data_ptr is in-buffer and the length check above
-                // guarantees a whole ucred is present. Copied out rather than
-                // borrowed, because ucred is plain data and may be unaligned
-                // in the cmsg buffer.
-                let cred: libc::ucred = unsafe {
-                    let mut c = std::mem::MaybeUninit::<libc::ucred>::uninit();
-                    std::ptr::copy_nonoverlapping(
-                        data_ptr,
-                        c.as_mut_ptr().cast::<u8>(),
-                        crate::ScmCredentials::SIZE,
-                    );
-                    c.assume_init()
-                };
-                return Some(AncillaryData::Credentials(
-                    crate::ScmCredentials::from_ucred(cred),
-                ));
-            }
-            // Unknown cmsg type — skip and continue walking. If we marked
-            // `current` null above (malformed), the next loop iteration
-            // returns None.
-        }
+            ReceivedMessage::Credentials(creds) => AncillaryData::Credentials(creds),
+        })
     }
 }
 
-/// Buffer for building and parsing Unix socket ancillary data (control
-/// messages).
+fn header_len() -> usize {
+    // SAFETY: pure calculation with a zero payload, no pointers or overflow.
+    unsafe { libc::CMSG_LEN(0) as usize }
+}
+
+fn cmsg_space(payload_len: usize) -> Option<usize> {
+    // Derive the target's ABI alignment from libc, but do length arithmetic
+    // in checked usize operations instead of narrowing a caller length to u32.
+    let alignment = unsafe { (libc::CMSG_SPACE(1) - libc::CMSG_SPACE(0)) as usize };
+    let padded = payload_len.checked_add(alignment - 1)? / alignment * alignment;
+    header_len().checked_add(padded)
+}
+
+struct RawMessage<'a> {
+    level: libc::c_int,
+    kind: libc::c_int,
+    data: &'a [u8],
+}
+
+impl RawMessage<'_> {
+    fn rights(&self) -> impl Iterator<Item = RawFd> + '_ {
+        self.data
+            .chunks_exact(mem::size_of::<RawFd>())
+            .map(|bytes| RawFd::from_ne_bytes(bytes.try_into().expect("exact fd-sized chunk")))
+            .filter(|&fd| fd >= 0)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn credentials(&self) -> Option<crate::ScmCredentials> {
+        if self.level != libc::SOL_SOCKET
+            || self.kind != libc::SCM_CREDENTIALS
+            || self.data.len() < crate::ScmCredentials::SIZE
+        {
+            return None;
+        }
+        // SAFETY: ucred consists of integer fields, and the whole value fits.
+        // read_unaligned imposes no alignment requirement on the byte slice.
+        let cred = unsafe { self.data.as_ptr().cast::<libc::ucred>().read_unaligned() };
+        Some(crate::ScmCredentials::from_ucred(cred))
+    }
+}
+
+/// Byte parser only: never creates ownership from untrusted input.
+struct RawMessages<'a> {
+    remaining: &'a [u8],
+}
+
+impl<'a> Iterator for RawMessages<'a> {
+    type Item = RawMessage<'a>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let bytes = mem::take(&mut self.remaining);
+        if bytes.len() < mem::size_of::<libc::cmsghdr>() {
+            return None;
+        }
+        // SAFETY: a whole integer-only header fits. No aligned reference is
+        // formed, including for caller-provided offset byte slices.
+        let header = unsafe { bytes.as_ptr().cast::<libc::cmsghdr>().read_unaligned() };
+        #[allow(clippy::unnecessary_cast)]
+        let total = header.cmsg_len as usize;
+        if total < header_len() || total > bytes.len() {
+            return None;
+        }
+        let data = &bytes[header_len()..total];
+        if let Some(next) = cmsg_space(data.len()).filter(|&next| next <= bytes.len()) {
+            self.remaining = &bytes[next..];
+        }
+        Some(RawMessage {
+            level: header.cmsg_level,
+            kind: header.cmsg_type,
+            data,
+        })
+    }
+}
+
+/// Own descriptors from one fresh successful recvmsg, before any fallible
+/// postprocessing. Never call with send buffers or previously consumed bytes.
 ///
-/// Used with `sendmsg`/`recvmsg` to pass file descriptors via `SCM_RIGHTS`.
+/// # Safety
+/// Every SCM_RIGHTS integer must be an open descriptor newly owned by the caller.
+pub(crate) unsafe fn take_received(buffer: &[u8]) -> Vec<ReceivedMessage> {
+    let mut messages = Vec::new();
+    for message in (RawMessages { remaining: buffer }) {
+        if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
+            let fds = message
+                .rights()
+                .map(|raw| {
+                    // SAFETY: guaranteed by this function's fresh-recv contract.
+                    unsafe { OwnedFd::from_raw_fd(raw) }
+                })
+                .collect();
+            messages.push(ReceivedMessage::Rights(fds));
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(creds) = message.credentials() {
+            messages.push(ReceivedMessage::Credentials(creds));
+        }
+    }
+    messages
+}
+
+/// Caller-provided storage for sending or receiving ancillary messages.
+///
+/// Send descriptors remain borrowed until this buffer is dropped. Received
+/// descriptors are owned before [`crate::cmsg_recvmsg`] returns. Use
+/// [`messages`](Self::messages) to drain them; unread descriptors close on
+/// clear, the next receive (including a failed receive), or drop.
+///
+/// After receiving, call [`clear`](Self::clear) before building a new send.
+/// Construct a separate send buffer when forwarding received descriptors.
 pub struct SocketAncillary<'a> {
     pub(crate) buffer: &'a mut [u8],
     pub(crate) length: usize,
     pub(crate) truncated: bool,
+    pub(crate) received: Vec<ReceivedMessage>,
+    pub(crate) receive_mode: bool,
+    borrowed: Vec<BorrowedFd<'a>>,
 }
 
 impl<'a> SocketAncillary<'a> {
-    /// Create a new `SocketAncillary` backed by the given buffer.
+    /// Create empty storage. Any byte-slice alignment is accepted.
     pub fn new(buffer: &'a mut [u8]) -> Self {
-        SocketAncillary {
+        Self {
             buffer,
             length: 0,
             truncated: false,
+            received: Vec::new(),
+            receive_mode: false,
+            borrowed: Vec::new(),
         }
     }
 
-    /// Minimum buffer size needed to send `num_fds` file descriptors.
+    /// Buffer size for one SCM_RIGHTS message containing `num_fds` descriptors.
+    /// Panics if the size cannot be represented by usize.
     pub fn buffer_size_for_rights(num_fds: usize) -> usize {
-        // SAFETY: CMSG_SPACE is a pure inline calculation.
-        unsafe { libc::CMSG_SPACE((num_fds * mem::size_of::<RawFd>()) as libc::c_uint) as usize }
+        num_fds
+            .checked_mul(mem::size_of::<RawFd>())
+            .and_then(cmsg_space)
+            .expect("ancillary buffer size overflow")
     }
 
-    /// Minimum buffer size needed to carry one `SCM_CREDENTIALS` cmsg.
-    ///
-    /// Add this to [`buffer_size_for_rights`](Self::buffer_size_for_rights)
-    /// when one message carries both.
+    /// Additional space for one SCM_CREDENTIALS message.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn buffer_size_for_credentials() -> usize {
-        // SAFETY: CMSG_SPACE is a pure inline calculation.
-        unsafe { libc::CMSG_SPACE(crate::ScmCredentials::SIZE as libc::c_uint) as usize }
+        cmsg_space(crate::ScmCredentials::SIZE).expect("credentials fit in usize")
     }
 
-    /// Append sender credentials as an `SCM_CREDENTIALS` cmsg.
-    ///
-    /// The kernel rejects the send with `EPERM` if this process is not allowed
-    /// to claim the values. [`ScmCredentials::for_this_process`](crate::ScmCredentials::for_this_process)
-    /// is always
-    /// allowed. A receiver with `SO_PASSCRED` set gets credentials even when
-    /// nothing is attached here, so this is only needed to claim values other
-    /// than the defaults.
+    /// Append credentials. The kernel validates the claim on send.
+    /// [`crate::ScmCredentials::for_this_process`] supplies permitted values.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn add_credentials(&mut self, creds: crate::ScmCredentials) -> Result<(), AncillaryError> {
         let cred = creds.to_ucred();
-        // SAFETY: plain data with no padding concerns for a byte copy.
+        // ucred is three consecutive integer fields without padding on Linux/Android.
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 (&cred as *const libc::ucred).cast::<u8>(),
@@ -265,125 +236,104 @@ impl<'a> SocketAncillary<'a> {
         self.add_cmsg(libc::SOL_SOCKET, libc::SCM_CREDENTIALS, bytes)
     }
 
-    /// Append one control message with an arbitrary payload.
-    ///
-    /// Shared by `add_fds` and `add_credentials`: same buffer walk, same
-    /// bounds checks, only the level, type and payload differ.
     fn add_cmsg(
         &mut self,
         level: libc::c_int,
-        ty: libc::c_int,
+        kind: libc::c_int,
         payload: &[u8],
     ) -> Result<(), AncillaryError> {
-        // SAFETY: pure inline calculation.
-        let space = unsafe { libc::CMSG_SPACE(payload.len() as libc::c_uint) as usize };
-        let new_len = self.length.checked_add(space).ok_or(AncillaryError)?;
-        if new_len > self.buffer.len() {
+        if self.receive_mode {
             return Err(AncillaryError);
         }
-
-        // SAFETY: identical walk to add_fds. The buffer is exclusively
-        // borrowed and proven large enough for `new_len` bytes above; the
-        // payload is copied into the data area CMSG_DATA points at, which
-        // CMSG_SPACE reserved.
-        unsafe {
-            let mut msg: libc::msghdr = mem::zeroed();
-            msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
-            msg.msg_controllen = new_len as _;
-
-            let cmsg = if self.length == 0 {
-                libc::CMSG_FIRSTHDR(&msg)
-            } else {
-                let mut walk_msg: libc::msghdr = mem::zeroed();
-                walk_msg.msg_control = self.buffer.as_mut_ptr() as *mut libc::c_void;
-                walk_msg.msg_controllen = self.length as _;
-
-                let mut cur = libc::CMSG_FIRSTHDR(&walk_msg);
-                while !cur.is_null() {
-                    let next = libc::CMSG_NXTHDR(&walk_msg, cur);
-                    if next.is_null() {
-                        break;
-                    }
-                    cur = next;
-                }
-                if cur.is_null() {
-                    libc::CMSG_FIRSTHDR(&msg)
-                } else {
-                    libc::CMSG_NXTHDR(&msg, cur)
-                }
-            };
-
-            if cmsg.is_null() {
-                return Err(AncillaryError);
-            }
-
-            (*cmsg).cmsg_level = level;
-            (*cmsg).cmsg_type = ty;
-            (*cmsg).cmsg_len = libc::CMSG_LEN(payload.len() as libc::c_uint) as _;
-
-            std::ptr::copy_nonoverlapping(payload.as_ptr(), libc::CMSG_DATA(cmsg), payload.len());
+        let space = cmsg_space(payload.len()).ok_or(AncillaryError)?;
+        let end = self.length.checked_add(space).ok_or(AncillaryError)?;
+        if end > self.buffer.len() {
+            return Err(AncillaryError);
         }
-
-        self.length = new_len;
+        let length = header_len()
+            .checked_add(payload.len())
+            .ok_or(AncillaryError)?;
+        #[allow(clippy::useless_conversion)]
+        let cmsg_len = length.try_into().map_err(|_| AncillaryError)?;
+        let bytes = &mut self.buffer[self.length..end];
+        bytes.fill(0);
+        let header = bytes.as_mut_ptr().cast::<libc::cmsghdr>();
+        // SAFETY: space reserves the whole header and payload. Form only raw
+        // field pointers and write unaligned. Writing fields individually keeps
+        // header padding initialized instead of copying Rust struct padding.
+        unsafe {
+            std::ptr::addr_of_mut!((*header).cmsg_level).write_unaligned(level);
+            std::ptr::addr_of_mut!((*header).cmsg_type).write_unaligned(kind);
+            std::ptr::addr_of_mut!((*header).cmsg_len).write_unaligned(cmsg_len);
+        }
+        bytes[header_len()..length].copy_from_slice(payload);
+        self.length = end;
         Ok(())
     }
 
-    /// Append file descriptors as an `SCM_RIGHTS` cmsg.
+    /// Append borrowed descriptors, retaining their lifetimes in this buffer.
+    /// The caller keeps ownership. Clear a received buffer before adding data.
     ///
-    /// `BorrowedFd` ensures the caller retains ownership of the fds.
-    pub fn add_fds(&mut self, fds: &[BorrowedFd<'_>]) -> Result<(), AncillaryError> {
+    /// ```compile_fail,E0505
+    /// use std::os::fd::AsFd;
+    /// use unix_ancillary::SocketAncillary;
+    /// let file = std::fs::File::open("/dev/null").unwrap();
+    /// let mut buf = [0u8; 128];
+    /// let mut ancillary = SocketAncillary::new(&mut buf);
+    /// ancillary.add_fds(&[file.as_fd()]).unwrap();
+    /// drop(file);
+    /// ancillary.clear();
+    /// ```
+    pub fn add_fds(&mut self, fds: &[BorrowedFd<'a>]) -> Result<(), AncillaryError> {
         let raw: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
-        // SAFETY: RawFd is a plain i32 with no padding and no invalid bit
-        // patterns, so viewing the slice as bytes is sound. add_cmsg copies
-        // them into the cmsg data area, which is what the previous
-        // write_unaligned loop did one fd at a time.
+        // SAFETY: RawFd is an integer without padding.
         let bytes = unsafe {
             std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), mem::size_of_val(&raw[..]))
         };
-        self.add_cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, bytes)
+        self.add_cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, bytes)?;
+        self.borrowed.extend_from_slice(fds);
+        Ok(())
     }
 
-    /// Iterate received ancillary data messages.
-    ///
-    /// Iterate exactly once; see [`ScmRights`].
-    pub fn messages(&self) -> Messages<'_> {
-        Messages::new(&self.buffer[..self.length], self.length)
+    /// Drain received messages exactly once. Send buffers yield no messages.
+    /// Dropping the iterator closes all unconsumed received descriptors.
+    pub fn messages(&mut self) -> Messages<'_> {
+        Messages {
+            inner: self.received.drain(..),
+        }
     }
 
-    /// Returns `true` if the ancillary data was truncated during receive.
-    ///
-    /// On platforms with `MSG_CMSG_CLOEXEC` (Linux/*BSD), truncation means
-    /// extra fds were discarded by the kernel and never entered our process.
-    /// On macOS, the kernel may have deposited fds beyond the buffer that
-    /// this crate cannot reach — **always size the buffer for the maximum
-    /// expected fd count on macOS**.
+    /// Whether recvmsg reported MSG_CTRUNC. Delivered descriptors are still
+    /// owned and cleaned up, but the complete ancillary message was not received.
     #[must_use]
     pub fn is_truncated(&self) -> bool {
         self.truncated
     }
 
-    /// Clear the ancillary buffer for reuse.
+    /// Close unread received descriptors and reset storage for a new send.
+    /// Sender borrows remain conservatively tied to this object's lifetime;
+    /// drop and reconstruct it to release that lifetime constraint.
     pub fn clear(&mut self) {
+        self.received.clear();
+        self.borrowed.clear();
         self.length = 0;
         self.truncated = false;
+        self.receive_mode = false;
     }
 }
 
-/// Internal entry point for fuzz harnesses. Walks an arbitrary byte buffer
-/// as if it were a kernel-formatted ancillary buffer.
-///
-/// **Not a stable API.** Hidden from rustdoc and not covered by the crate's
-/// semver guarantees.
-///
-/// # Safety
-///
-/// The iterator returned will produce `OwnedFd` values for any non-negative
-/// integer it finds in the SCM_RIGHTS data area. If those integers are not
-/// fds the caller exclusively owns, dropping the resulting `OwnedFd`s will
-/// close arbitrary descriptors in the process. Callers must either own
-/// every fd value present in `buf`, or wrap each yielded `OwnedFd` in
-/// `ManuallyDrop` before letting it drop.
+/// Exercise the byte parser without manufacturing descriptors from fuzz input.
+/// Hidden, unstable harness entry point; returns the number of parsed messages.
 #[doc(hidden)]
-pub unsafe fn __fuzz_parse(buf: &[u8]) -> Messages<'_> {
-    Messages::new(buf, buf.len())
+pub fn __fuzz_parse(buf: &[u8]) -> usize {
+    let mut count = 0;
+    for message in (RawMessages { remaining: buf }) {
+        if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
+            std::hint::black_box(message.rights().count());
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        std::hint::black_box(message.credentials());
+        count += 1;
+    }
+    count
 }
