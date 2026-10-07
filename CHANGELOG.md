@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.1] - 2026-10-08
+
+### Fixes
+
+- Linux/Android: descriptors delivered as `SCM_PIDFD` (receiver has
+  `SO_PASSPIDFD` set, Linux 6.5+) are now closed. Previously every receive on
+  such a socket leaked one pidfd. The pidfd is not exposed.
+- `AsyncUnixStreamExt::recv_fds_vectored` now returns a `Send` future, so it
+  can be used with `tokio::spawn` on a multi-threaded runtime.
+
+Regression tests cover both: an fd-count check with `SO_PASSPIDFD` enabled,
+and a compile-time `Send` check for every async method.
+
 ## [0.6.0] - 2026-09-06
 
 ### Safety fixes and migration
