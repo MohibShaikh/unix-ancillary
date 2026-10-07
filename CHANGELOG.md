@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixes
+
+- Sends without descriptors no longer attach an empty `SCM_RIGHTS` header;
+  they are a plain `sendmsg` with no control message, and allocate nothing.
+
 ## [0.6.1] - 2026-10-08
 
 ### Fixes

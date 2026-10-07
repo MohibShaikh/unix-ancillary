@@ -77,6 +77,10 @@ pub(crate) fn send_fds_vectored_impl(
     iov: &[io::IoSlice<'_>],
     fds: &[BorrowedFd<'_>],
 ) -> io::Result<usize> {
+    // No descriptors: send no control message, not an empty SCM_RIGHTS header.
+    if fds.is_empty() {
+        return cmsg::sendmsg_vectored(fd, iov, &[], 0);
+    }
     let mut buf = vec![0u8; SocketAncillary::buffer_size_for_rights(fds.len())];
     let mut ancillary = SocketAncillary::new(&mut buf);
     ancillary
