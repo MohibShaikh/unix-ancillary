@@ -199,3 +199,30 @@ async fn async_recv_exact_datagram_accepts_exact_count() {
     assert_eq!(received.data, b"dg");
     assert_eq!(received.fds.len(), 2);
 }
+
+/// Every async method must return a `Send` future so it can run on a
+/// multi-threaded runtime via `tokio::spawn`.
+#[allow(dead_code)]
+fn async_futures_are_send(
+    stream: &UnixStream,
+    datagram: &UnixDatagram,
+    iov: &mut [std::io::IoSliceMut<'_>],
+    buf: &mut [u8],
+    file: &std::fs::File,
+) {
+    fn send<T: Send>(_: T) {}
+    let out = [std::io::IoSlice::new(b"x")];
+    send(stream.send_fds(b"x", &[file]));
+    send(stream.send_fds_all(b"x", &[file]));
+    send(stream.send_fds_vectored(&out, &[file]));
+    send(stream.recv_fds::<1>());
+    send(stream.recv_fds_exact::<1>());
+    send(stream.recv_fds_vectored::<1>(iov));
+    send(stream.recv_fds_into::<1>(buf));
+    send(stream.recv_fds_exact_into::<1>(buf));
+    send(datagram.send_fds(b"x", &[file]));
+    send(datagram.recv_fds::<1>());
+    send(datagram.recv_fds_exact::<1>());
+    send(datagram.recv_fds_into::<1>(buf));
+    send(datagram.recv_fds_exact_into::<1>(buf));
+}

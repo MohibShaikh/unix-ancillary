@@ -118,11 +118,10 @@ impl AsyncUnixStreamExt for UnixStream {
         &self,
         iov: &mut [io::IoSliceMut<'_>],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        let iov = std::cell::RefCell::new(iov);
         self.async_io(Interest::READABLE, || {
             recv_fds_into_vectored_impl(
                 self.as_fd(),
-                &mut iov.borrow_mut()[..],
+                &mut *iov,
                 SocketKind::Stream,
                 CountMode::UpTo(N),
             )
