@@ -88,3 +88,40 @@ fn exact_receive_error_closes_all_received_fds() {
         "strict exact-count error leaked received descriptors"
     );
 }
+
+/// With `SO_PASSPIDFD` set (Linux 6.5+), the kernel attaches an `SCM_PIDFD`
+/// descriptor to every message alongside `SCM_RIGHTS`. Both are newly
+/// installed in the receiver, so both must be closed.
+#[cfg(target_os = "linux")]
+#[test]
+fn scm_pidfd_is_closed_not_leaked() {
+    use std::os::unix::io::AsRawFd;
+
+    let _guard = fd_lock();
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let on: libc::c_int = 1;
+    // SAFETY: rx is a live socket and `on` outlives the call.
+    let ret = unsafe {
+        libc::setsockopt(
+            rx.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PASSPIDFD,
+            (&on as *const libc::c_int).cast(),
+            std::mem::size_of_val(&on) as libc::socklen_t,
+        )
+    };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        assert_eq!(err.raw_os_error(), Some(libc::ENOPROTOOPT), "{err}");
+        eprintln!("skipping: kernel lacks SO_PASSPIDFD");
+        return;
+    }
+
+    let file = tempfile::tempfile().unwrap();
+    let before = count_open_fds();
+    for _ in 0..4 {
+        tx.send_fds(b"x", &[&file]).unwrap();
+        drop(rx.recv_fds::<1>().unwrap());
+    }
+    assert_eq!(count_open_fds(), before, "SCM_PIDFD descriptors leaked");
+}

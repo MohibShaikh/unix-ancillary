@@ -149,14 +149,28 @@ impl<'a> Iterator for RawMessages<'a> {
     }
 }
 
+/// `SCM_PIDFD` from include/linux/socket.h; libc 0.2 does not export it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SCM_PIDFD: libc::c_int = 0x04;
+
 /// Own descriptors from one fresh successful recvmsg, before any fallible
 /// postprocessing. Never call with send buffers or previously consumed bytes.
 ///
 /// # Safety
-/// Every SCM_RIGHTS integer must be an open descriptor newly owned by the caller.
+/// Every SCM_RIGHTS and SCM_PIDFD integer must be an open descriptor newly
+/// owned by the caller.
 pub(crate) unsafe fn take_received(buffer: &[u8]) -> Vec<ReceivedMessage> {
     let mut messages = Vec::new();
     for message in (RawMessages { remaining: buffer }) {
+        // SO_PASSPIDFD (Linux 6.5+) makes the kernel install a pidfd with
+        // every message. It is not exposed, so close it here.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if message.level == libc::SOL_SOCKET && message.kind == SCM_PIDFD {
+            for raw in message.rights() {
+                // SAFETY: guaranteed by this function's fresh-recv contract.
+                drop(unsafe { OwnedFd::from_raw_fd(raw) });
+            }
+        }
         if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
             let fds = message
                 .rights()
