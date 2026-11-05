@@ -192,9 +192,8 @@ fn send_fds_all_transfers_payload_and_descriptor() {
     assert_eq!(received, vec![b'x'; 128 * 1024]);
 }
 
-/// Shrink the send buffer so the first `sendmsg` cannot accept the whole
-/// payload. Without this the kernel takes all 128 KiB in one call and the
-/// completion loop in `send_fds_all` is never exercised.
+/// Shrink the send buffer. A blocking `sendmsg` still waits and takes the whole
+/// payload in one call on Linux; `tests/partial_send.rs` forces a short send.
 fn shrink_sndbuf(s: &UnixStream) {
     let v: libc::c_int = 2048;
     // SAFETY: live socket, correct option length for SO_SNDBUF.

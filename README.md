@@ -14,14 +14,16 @@ for graceful restart. Extension traits supply owned receives, exact descriptor
 counts, complete stream sends, and explicit truncation errors.
 
 The default dependency is `libc`. Tokio support is optional. The MSRV is Rust
-1.75. This is a transport primitive; it does not authenticate peers, frame
+1.75. New tokio releases can need a newer compiler (tokio 1.54.1 needs 1.85), so
+on Rust 1.75 the `tokio` feature needs a pin:
+`cargo update -p tokio --precise 1.50.0`. This is a transport primitive; it does not authenticate peers, frame
 streams, spawn workers, or enforce a sandbox.
 
 | Your integration | A reasonable starting point |
 |---|---|
 | Standard or Tokio Unix sockets; simple FD handoff | `unix-ancillary` |
 | Already using `rustix`; need configurable ancillary buffers or syscall flags | [rustix ancillary buffers](https://docs.rs/rustix/latest/src/rustix/net/send_recv/msg.rs.html) |
-| Need Unix socket addressing or additional socket types | [uds](https://github.com/tormol/uds) |
+| Need Unix socket addressing | [uds](https://github.com/tormol/uds), which is [no longer maintained](https://github.com/tormol/uds/issues/29) |
 | Existing raw-FD sendfd integration | Consider the [migration guide](MIGRATION.md) if automatic ownership and error policies reduce your code |
 
 `rustix` also supports owned received descriptors. An extra convenience dependency
@@ -30,7 +32,7 @@ and its `ScmRights` iterator yields raw descriptors.
 
 ## Quick start
 
-Version **0.6.0** repairs the low-level safety issues described in the
+Versions before 0.6.0 have low-level safety issues described in the
 [changelog](CHANGELOG.md). See [MIGRATION.md](MIGRATION.md) when upgrading.
 
 ```toml
@@ -76,10 +78,12 @@ processes retain their normal OS permissions; this example does not sandbox them
   the connection through your protocol. Concurrent writers must serialize whole
   protocol operations if interleaving would be invalid.
 - `recv_fds` / `recv_fds_into`: receive up to `N` descriptors and close surplus.
-  The allocating variant uses 4 KiB for streams and 64 KiB for datagrams.
+  The allocating variant uses 4 KiB for streams and 64 KiB for datagrams, and
+  reports how many it closed in `surplus_closed`.
 - `recv_fds_exact` / `recv_fds_exact_into`: reject fewer or more than `N` descriptors
-  in this receive, closing the entire batch on mismatch. This does not wait for
-  later stream bytes or descriptors to complete a message.
+  in this receive, closing the entire batch and discarding its bytes on mismatch.
+  This does not wait for later stream bytes or descriptors to complete a message.
+  With `N > 0`, a closed peer is the same `InvalidData` error.
 - Convenience datagram receives reject payload truncation with `InvalidData`.
   All convenience receives reject ancillary truncation with `InvalidData`.
 - Vectored methods are available on both blocking traits and the async stream
@@ -108,7 +112,21 @@ assert_eq!(n, 1);
 assert_eq!(fds.len(), 1);
 ```
 
+## Seqpacket
+
+`unix_ancillary::seqpacket` has the same operations as free functions over any
+connected `SOCK_SEQPACKET` socket that is `AsFd`, and `seqpacket::tokio` has async
+forms over `AsyncFd`. Messages keep their boundaries, so an empty payload can carry
+descriptors, and a payload too long for the buffer is `InvalidData`. Tests run on
+Linux. macOS has no `AF_UNIX` `SOCK_SEQPACKET`.
+
 ## Low-level ancillary data
+
+`cmsg_sendmsg` does not apply the stream payload rule. On a stream, an empty
+payload returns `Ok(0)` and the kernel delivers no descriptors.
+
+`cmsg_recvmsg_peek` (Linux/Android) reads a message without consuming it. Those
+kernels install fresh duplicates on each peek, and each copy is yours to close.
 
 `SocketAncillary` accepts caller-provided byte storage at any alignment.
 `add_fds` retains the lifetime of the borrowed descriptors. `cmsg_recvmsg`
@@ -122,8 +140,9 @@ produce no received messages. After a receive, call `clear` before building a
 send; use a separate send buffer to forward received descriptors.
 
 Linux/Android additionally expose `ScmCredentials`, `add_credentials`, and
-`set_passcred` / `passcred` over `AsFd`. Enable `SO_PASSCRED` before receiving;
-reserve `buffer_size_for_rights(n) + buffer_size_for_credentials()` bytes for
+`set_passcred` / `passcred` over `AsFd`. Enable `SO_PASSCRED` before the peer
+sends. On a message already queued, Linux reports pid 0 and the overflow uid and
+gid instead of the sender. Reserve `buffer_size_for_rights(n) + buffer_size_for_credentials()` bytes for
 combined low-level messages. Credentials and descriptors arrive from the same
 receive. High-level FD-only methods discard credentials; use the low-level API
 when your protocol validates them. See [migration examples](MIGRATION.md).
@@ -144,13 +163,23 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
 - Every descriptor delivered in the control buffer is owned and cleaned up.
   Kernel handling of descriptors omitted by truncation is platform-specific;
   userspace cannot close descriptor numbers it was not given.
-- CI executes tests on Linux and macOS. BSD documentation builds check
-  compilation, not kernel behavior. Android uses the Linux credential path
-  but is not an execution target in CI.
+- A send to a closed peer returns `BrokenPipe`. On Apple this comes from mapping
+  the `EINVAL` that `SO_NOSIGPIPE` returns on such a socket.
+- CI executes tests on Linux and macOS, and compiles FreeBSD and Android without
+  running them. Nothing in CI checks kernel behavior on a BSD or on Android.
+  OpenBSD, NetBSD and DragonFly are not compiled in CI.
+
+## Cost
+
+A send allocates nothing. A receive allocates its returned `Vec` when descriptors
+arrive and nothing when none do; `recv_fds` also allocates its data buffer. Control
+storage stays on the stack up to 4 KiB. A macOS process with an `RLIMIT_NOFILE`
+above about 1,000 uses the heap for it, and also pays one `setsockopt` per send and
+one `getrlimit` per receive. `tests/allocations.rs` checks these counts on Linux.
 
 ## Verification
 
-The test suite covers partial sends, SIGPIPE with the default signal handler,
+The test suite covers partial sends, ancillary truncation, SIGPIPE with the default signal handler,
 strict counts, payload truncation, ownership cleanup, repeated drains, arbitrary
 buffer alignment, and combined credentials at Linux's FD limit. A compile-fail
 doctest checks that a send buffer cannot outlive its descriptors. CI also runs

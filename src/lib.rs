@@ -24,7 +24,8 @@
 //! truncation; callers must handle the error.
 //!
 //! Low-level [`cmsg_recvmsg`] exposes truncation flags and owns the delivered
-//! descriptors even when truncated. Size [`SocketAncillary`] for the messages
+//! descriptors even when truncated, including on Apple kernels, which report a
+//! length longer than what they copied. Size [`SocketAncillary`] for the messages
 //! your protocol accepts, then drain [`SocketAncillary::messages`] once.
 //! Platform handling of descriptors omitted from the control buffer is a
 //! kernel responsibility; this crate cannot close descriptors it cannot observe.
@@ -92,6 +93,7 @@ mod cmsg;
 mod credentials;
 mod ext;
 mod platform;
+pub mod seqpacket;
 
 pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -123,6 +125,9 @@ pub struct RecvResult {
 /// Send data with ancillary control messages over a Unix socket.
 ///
 /// Low-level API. Prefer [`UnixStreamExt::send_fds`] for convenience.
+///
+/// Unlike the convenience methods, this does not check the stream payload rule.
+/// On a stream, an empty payload returns `Ok(0)` and delivers no descriptors.
 pub fn cmsg_sendmsg(
     fd: BorrowedFd<'_>,
     iov: &[io::IoSlice<'_>],
@@ -152,10 +157,46 @@ pub fn cmsg_recvmsg(
     iov: &mut [io::IoSliceMut<'_>],
     ancillary: &mut SocketAncillary<'_>,
 ) -> io::Result<RecvResult> {
+    recv_into_ancillary(fd, iov, ancillary, 0)
+}
+
+/// Like [`cmsg_recvmsg`], but leave the message queued (`MSG_PEEK`).
+///
+/// Linux and Android only: their kernels install a fresh duplicate of each
+/// descriptor on every peek, so what this returns is safely owned. The final
+/// real receive delivers its own copies, and every copy must be closed. XNU does
+/// not install descriptors on peek, and no BSD kernel has been tested.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn cmsg_recvmsg_peek(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    ancillary: &mut SocketAncillary<'_>,
+) -> io::Result<RecvResult> {
+    recv_into_ancillary(fd, iov, ancillary, libc::MSG_PEEK)
+}
+
+fn recv_into_ancillary(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    ancillary: &mut SocketAncillary<'_>,
+    extra_flags: libc::c_int,
+) -> io::Result<RecvResult> {
     ancillary.clear();
     ancillary.receive_mode = true;
-    let result = cmsg::recvmsg_vectored(fd, iov, ancillary.buffer)?;
-    ancillary.received = result.messages;
+    let result = cmsg::recvmsg_raw(fd, iov, ancillary.buffer, extra_flags)?;
+    // SAFETY: this is fresh, kernel-produced recvmsg output, consumed once.
+    // Establish ownership before fallible CLOEXEC processing so an error drops
+    // every delivered descriptor, including those not yet processed.
+    unsafe {
+        ancillary::take_received_into(
+            &ancillary.buffer[..result.ancillary_len],
+            &mut ancillary.received,
+        );
+    }
+    if let Err(err) = platform::cloexec_received(&ancillary.received) {
+        ancillary.received.clear();
+        return Err(err);
+    }
     ancillary.length = result.ancillary_len;
     ancillary.truncated = result.ancillary_truncated;
     Ok(RecvResult {

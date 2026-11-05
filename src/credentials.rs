@@ -23,7 +23,8 @@ use std::os::fd::{AsFd, AsRawFd};
 /// The kernel validates these on send. An unprivileged sender may only claim
 /// its own pid and its real, effective or saved uid and gid; anything else
 /// needs `CAP_SYS_ADMIN` for the pid or `CAP_SETUID` / `CAP_SETGID` for the
-/// ids. So a received value is trustworthy in a way the payload is not.
+/// ids. So a received value is trustworthy in a way the payload is not, as long
+/// as `SO_PASSCRED` was on when the peer sent the message (see [`set_passcred`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScmCredentials {
     pid: libc::pid_t,
@@ -115,9 +116,11 @@ impl ScmCredentials {
 /// on the std types would not.
 ///
 /// Credentials only arrive on a socket that has this set, and it must be set
-/// before the message is received. Once on, the kernel attaches the sender's
-/// credentials to every message whether or not the sender asked, so this is
-/// usually all a receiver needs.
+/// before the peer sends. A message queued earlier reports pid 0 and the overflow
+/// uid and gid, which look like real values, so enable this before the peer can
+/// connect or before handing it the socket. Once on, the kernel attaches the
+/// sender's credentials to every message whether or not the sender asked, so
+/// this is usually all a receiver needs.
 pub fn set_passcred<T: AsFd>(sock: &T, on: bool) -> io::Result<()> {
     let value: libc::c_int = i32::from(on);
     // SAFETY: passing a correctly sized int for a documented boolean option.

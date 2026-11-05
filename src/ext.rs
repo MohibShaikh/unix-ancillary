@@ -1,8 +1,8 @@
 use std::io;
-use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::{UnixDatagram, UnixStream};
 
-use crate::ancillary::{ReceivedMessage, SocketAncillary};
+use crate::ancillary::{with_control, SocketAncillary};
 use crate::cmsg;
 use crate::platform;
 
@@ -52,6 +52,8 @@ pub struct ReceivedFds {
     /// File descriptors received, capped at `N`. Each `OwnedFd` is closed on
     /// drop.
     pub fds: Vec<OwnedFd>,
+    /// Descriptors the peer sent beyond `N`, already closed.
+    pub surplus_closed: usize,
 }
 
 pub(crate) fn validate_stream_send(data: &[u8], fd_count: usize) -> io::Result<()> {
@@ -64,26 +66,30 @@ pub(crate) fn validate_stream_send(data: &[u8], fd_count: usize) -> io::Result<(
     Ok(())
 }
 
-pub(crate) fn send_fds_impl(
+pub(crate) fn send_fds_impl<F: AsFd>(
     fd: BorrowedFd<'_>,
     data: &[u8],
-    fds: &[BorrowedFd<'_>],
+    fds: &[F],
 ) -> io::Result<usize> {
     send_fds_vectored_impl(fd, &[io::IoSlice::new(data)], fds)
 }
 
-pub(crate) fn send_fds_vectored_impl(
+pub(crate) fn send_fds_vectored_impl<F: AsFd>(
     fd: BorrowedFd<'_>,
     iov: &[io::IoSlice<'_>],
-    fds: &[BorrowedFd<'_>],
+    fds: &[F],
 ) -> io::Result<usize> {
-    let mut buf = vec![0u8; SocketAncillary::buffer_size_for_rights(fds.len())];
-    let mut ancillary = SocketAncillary::new(&mut buf);
-    ancillary
-        .add_fds(fds)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    cmsg::sendmsg_vectored(fd, iov, ancillary.buffer, ancillary.length)
+    // No descriptors: send no control message, not an empty SCM_RIGHTS header.
+    if fds.is_empty() {
+        return cmsg::sendmsg_vectored(fd, iov, &[], 0);
+    }
+    with_control(SocketAncillary::buffer_size_for_rights(fds.len()), |buf| {
+        let mut ancillary = SocketAncillary::new(buf);
+        ancillary
+            .add_rights(fds.iter().map(|f| f.as_fd().as_raw_fd()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        cmsg::sendmsg_vectored(fd, iov, ancillary.buffer, ancillary.length)
+    })
 }
 
 /// Total payload bytes across the iovecs, for the stream empty-payload rule.
@@ -112,6 +118,36 @@ pub(crate) fn recv_fds_into_vectored_impl(
     kind: SocketKind,
     mode: CountMode,
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
+    let (bytes_read, fds, _) = recv_core(fd, iov, kind, mode)?;
+    Ok((bytes_read, fds))
+}
+
+/// Receive into `data_buf` and move it into a [`ReceivedFds`]. On error,
+/// including `WouldBlock`, `data_buf` stays in place for a retry.
+pub(crate) fn recv_owned_impl(
+    fd: BorrowedFd<'_>,
+    data_buf: &mut Vec<u8>,
+    kind: SocketKind,
+    mode: CountMode,
+) -> io::Result<ReceivedFds> {
+    let mut iov = [io::IoSliceMut::new(data_buf)];
+    let (bytes_read, fds, surplus_closed) = recv_core(fd, &mut iov, kind, mode)?;
+    let mut data = std::mem::take(data_buf);
+    data.truncate(bytes_read);
+    Ok(ReceivedFds {
+        data,
+        fds,
+        surplus_closed,
+    })
+}
+
+/// Returns `(bytes_read, fds, surplus_closed)`.
+fn recv_core(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    kind: SocketKind,
+    mode: CountMode,
+) -> io::Result<(usize, Vec<OwnedFd>, usize)> {
     let cap = mode.count().max(platform::max_recv_fds());
     let size = SocketAncillary::buffer_size_for_rights(cap);
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -123,21 +159,10 @@ pub(crate) fn recv_fds_into_vectored_impl(
                 "ancillary buffer size overflow",
             )
         })?;
-    let mut anc_buf = vec![0u8; size];
 
-    let result = cmsg::recvmsg_vectored(fd, iov, &mut anc_buf)?;
-
-    let mut all_fds: Vec<OwnedFd> = Vec::new();
-    for message in result.messages {
-        match message {
-            ReceivedMessage::Rights(fds) => all_fds.extend(fds),
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            ReceivedMessage::Credentials(_) => {}
-        }
-    }
+    let (result, mut fds) = with_control(size, |buf| cmsg::recv_fds(fd, iov, buf))?;
 
     if result.ancillary_truncated {
-        drop(all_fds);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "ancillary data truncated; discard the incomplete message",
@@ -149,7 +174,6 @@ pub(crate) fn recv_fds_into_vectored_impl(
         // this point are lost; closing the fds we did receive keeps the
         // process state clean. `cmsg_recvmsg` is the only path that reports
         // the flag instead of failing.
-        drop(all_fds);
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "datagram payload truncated before it fit the receive buffer",
@@ -158,22 +182,24 @@ pub(crate) fn recv_fds_into_vectored_impl(
 
     match mode {
         CountMode::UpTo(n) => {
-            // Keep first n; remaining `OwnedFd`s drop here, closing surplus.
-            let kept: Vec<OwnedFd> = all_fds.into_iter().take(n).collect();
-            Ok((result.bytes_read, kept))
+            // Keep first n; truncate closes the surplus `OwnedFd`s.
+            let surplus = fds.len().saturating_sub(n);
+            fds.truncate(n);
+            Ok((result.bytes_read, fds, surplus))
         }
         CountMode::Exact(n) => {
-            if all_fds.len() != n {
-                let observed = all_fds.len();
-                // Close every received descriptor before reporting the count
-                // mismatch; the caller must not observe a partial set.
-                drop(all_fds);
+            if fds.len() != n {
+                // Returning drops `fds`, closing every received descriptor; the
+                // caller must not observe a partial set.
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("expected exactly {n} file descriptors, received {observed}"),
+                    format!(
+                        "expected exactly {n} file descriptors, received {}",
+                        fds.len()
+                    ),
                 ));
             }
-            Ok((result.bytes_read, all_fds))
+            Ok((result.bytes_read, fds, 0))
         }
     }
 }
@@ -226,9 +252,10 @@ pub trait UnixStreamExt {
 
     /// Receive data and up to `N` file descriptors.
     ///
-    /// Allocates an internal 4 KiB data buffer plus an oversized cmsg buffer
-    /// that prevents kernel-level fd leaks. Surplus fds beyond `N` are
-    /// closed automatically.
+    /// Allocates a 4 KiB data buffer. Surplus fds beyond `N` are closed
+    /// automatically and counted in [`ReceivedFds::surplus_closed`]. Control
+    /// storage reserves room for many descriptors, but a peer can still
+    /// overflow it; that is reported as `InvalidData`.
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds`](Self::recv_fds) but writes data into a
@@ -242,7 +269,10 @@ pub trait UnixStreamExt {
     ///
     /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
     /// when the peer sends fewer or more than `N` descriptors. Surplus
-    /// descriptors are still closed before the error is returned.
+    /// descriptors are still closed before the error is returned, and the
+    /// bytes from that receive are discarded. A closed peer also counts as
+    /// receiving zero descriptors, so with `N > 0` end of stream is this same
+    /// error. Use [`recv_fds`](Self::recv_fds) to tell the two apart.
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
@@ -256,8 +286,7 @@ pub trait UnixStreamExt {
 impl UnixStreamExt for UnixStream {
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
         validate_stream_send(data, fds.len())?;
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
-        send_fds_impl(self.as_fd(), data, &borrowed)
+        send_fds_impl(self.as_fd(), data, fds)
     }
 
     fn send_fds_vectored(&self, iov: &[io::IoSlice<'_>], fds: &[impl AsFd]) -> io::Result<usize> {
@@ -267,8 +296,7 @@ impl UnixStreamExt for UnixStream {
                 "SCM_RIGHTS over a Unix stream requires at least one payload byte",
             ));
         }
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
-        send_fds_vectored_impl(self.as_fd(), iov, &borrowed)
+        send_fds_vectored_impl(self.as_fd(), iov, fds)
     }
 
     fn recv_fds_vectored<const N: usize>(
@@ -280,11 +308,10 @@ impl UnixStreamExt for UnixStream {
 
     fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()> {
         validate_stream_send(data, fds.len())?;
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
-        let mut sent = if borrowed.is_empty() {
+        let mut sent = if fds.is_empty() {
             0
         } else {
-            let first = send_fds_impl(self.as_fd(), data, &borrowed)?;
+            let first = send_fds_impl(self.as_fd(), data, fds)?;
             if first == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -305,17 +332,12 @@ impl UnixStreamExt for UnixStream {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        let (n, fds) = recv_fds_into_impl(
+        recv_owned_impl(
             self.as_fd(),
             &mut data_buf,
             SocketKind::Stream,
             CountMode::UpTo(N),
-        )?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
-        })
+        )
     }
 
     fn recv_fds_into<const N: usize>(
@@ -332,17 +354,12 @@ impl UnixStreamExt for UnixStream {
 
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        let (n, fds) = recv_fds_into_impl(
+        recv_owned_impl(
             self.as_fd(),
             &mut data_buf,
             SocketKind::Stream,
             CountMode::Exact(N),
-        )?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
-        })
+        )
     }
 
     fn recv_fds_exact_into<const N: usize>(
@@ -380,9 +397,10 @@ pub trait UnixDatagramExt {
 
     /// Receive data and up to `N` fds.
     ///
-    /// Allocates an internal 64 KiB data buffer plus an oversized cmsg
-    /// buffer that prevents kernel-level fd leaks. Surplus fds beyond `N`
-    /// are closed automatically.
+    /// Allocates a 64 KiB data buffer. Surplus fds beyond `N` are closed
+    /// automatically and counted in [`ReceivedFds::surplus_closed`]. Control
+    /// storage reserves room for many descriptors, but a peer can still
+    /// overflow it; that is reported as `InvalidData`.
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds`](Self::recv_fds) but writes data into a
@@ -396,7 +414,10 @@ pub trait UnixDatagramExt {
     ///
     /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
     /// when the peer sends fewer or more than `N` descriptors. Surplus
-    /// descriptors are still closed before the error is returned.
+    /// descriptors are still closed before the error is returned, and the
+    /// bytes from that receive are discarded. A closed peer also counts as
+    /// receiving zero descriptors, so with `N > 0` end of stream is this same
+    /// error. Use [`recv_fds`](Self::recv_fds) to tell the two apart.
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
@@ -409,8 +430,7 @@ pub trait UnixDatagramExt {
 
 impl UnixDatagramExt for UnixDatagram {
     fn send_fds_vectored(&self, iov: &[io::IoSlice<'_>], fds: &[impl AsFd]) -> io::Result<usize> {
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
-        send_fds_vectored_impl(self.as_fd(), iov, &borrowed)
+        send_fds_vectored_impl(self.as_fd(), iov, fds)
     }
 
     fn recv_fds_vectored<const N: usize>(
@@ -421,23 +441,17 @@ impl UnixDatagramExt for UnixDatagram {
     }
 
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
-        send_fds_impl(self.as_fd(), data, &borrowed)
+        send_fds_impl(self.as_fd(), data, fds)
     }
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        let (n, fds) = recv_fds_into_impl(
+        recv_owned_impl(
             self.as_fd(),
             &mut data_buf,
             SocketKind::Datagram,
             CountMode::UpTo(N),
-        )?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
-        })
+        )
     }
 
     fn recv_fds_into<const N: usize>(
@@ -454,17 +468,12 @@ impl UnixDatagramExt for UnixDatagram {
 
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        let (n, fds) = recv_fds_into_impl(
+        recv_owned_impl(
             self.as_fd(),
             &mut data_buf,
             SocketKind::Datagram,
             CountMode::Exact(N),
-        )?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
-        })
+        )
     }
 
     fn recv_fds_exact_into<const N: usize>(

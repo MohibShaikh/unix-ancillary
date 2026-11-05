@@ -1,6 +1,6 @@
 use std::io;
 use std::mem;
-use std::os::unix::io::{AsRawFd, BorrowedFd};
+use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
 
 use crate::platform;
 
@@ -9,7 +9,6 @@ pub(crate) struct RecvMsgResult {
     pub ancillary_len: usize,
     pub ancillary_truncated: bool,
     pub data_truncated: bool,
-    pub messages: Vec<crate::ancillary::ReceivedMessage>,
 }
 
 /// Send ordinary bytes without ancillary data, using the same signal-safe
@@ -55,15 +54,13 @@ pub(crate) fn sendmsg_vectored(
     }
 }
 
-/// Receive data and ancillary control messages from a Unix socket.
-///
-/// On platforms without `MSG_CMSG_CLOEXEC`, sets `FD_CLOEXEC` on every
-/// received fd before returning. If that fails for any fd, all received fds
-/// are closed and the error is returned — callers never see partial state.
-pub(crate) fn recvmsg_vectored(
+/// Receive into caller storage, leaving descriptors unowned in `ancillary_buf`.
+/// The caller must take ownership before doing anything fallible.
+pub(crate) fn recvmsg_raw(
     fd: BorrowedFd<'_>,
     iov: &mut [io::IoSliceMut<'_>],
     ancillary_buf: &mut [u8],
+    extra_flags: libc::c_int,
 ) -> io::Result<RecvMsgResult> {
     // SAFETY: same justification as sendmsg_vectored.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
@@ -75,7 +72,8 @@ pub(crate) fn recvmsg_vectored(
     // SAFETY: msghdr fully populated; ancillary_buf borrowed mutably for the
     // syscall duration; fd is a valid descriptor.
     let ret = loop {
-        let ret = unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, platform::RECV_FLAGS) };
+        let ret =
+            unsafe { libc::recvmsg(fd.as_raw_fd(), &mut msg, platform::RECV_FLAGS | extra_flags) };
         if ret >= 0 {
             break ret;
         }
@@ -88,21 +86,29 @@ pub(crate) fn recvmsg_vectored(
     };
 
     #[allow(clippy::unnecessary_cast)]
-    let ancillary_len = msg.msg_controllen as usize;
-    let ancillary_truncated = (msg.msg_flags & libc::MSG_CTRUNC) != 0;
-    let data_truncated = (msg.msg_flags & libc::MSG_TRUNC) != 0;
+    Ok(RecvMsgResult {
+        bytes_read: ret as usize,
+        ancillary_len: msg.msg_controllen as usize,
+        ancillary_truncated: (msg.msg_flags & libc::MSG_CTRUNC) != 0,
+        data_truncated: (msg.msg_flags & libc::MSG_TRUNC) != 0,
+    })
+}
 
+/// Receive and own every delivered descriptor as one flat list.
+///
+/// On platforms without `MSG_CMSG_CLOEXEC`, sets `FD_CLOEXEC` on every
+/// received fd before returning. If that fails for any fd, all received fds
+/// are closed and the error is returned — callers never see partial state.
+pub(crate) fn recv_fds(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    ancillary_buf: &mut [u8],
+) -> io::Result<(RecvMsgResult, Vec<OwnedFd>)> {
+    let result = recvmsg_raw(fd, iov, ancillary_buf, 0)?;
     // SAFETY: this is fresh, kernel-produced recvmsg output, consumed once.
     // Establish ownership before fallible CLOEXEC processing so an error drops
     // every delivered descriptor, including those not yet processed.
-    let messages = unsafe { crate::ancillary::take_received(&ancillary_buf[..ancillary_len]) };
-    platform::cloexec_received(&messages)?;
-
-    Ok(RecvMsgResult {
-        bytes_read: ret as usize,
-        ancillary_len,
-        ancillary_truncated,
-        data_truncated,
-        messages,
-    })
+    let fds = unsafe { crate::ancillary::take_fds(&ancillary_buf[..result.ancillary_len]) };
+    platform::cloexec_fds(&fds)?;
+    Ok((result, fds))
 }
