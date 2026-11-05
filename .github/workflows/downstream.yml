@@ -1,0 +1,26 @@
+name: Downstream
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  softnet:
+    name: softnet tests (macOS)
+    # Same runner softnet uses for its own tests.
+    runs-on: macos-26
+    env:
+      SOFTNET_COMMIT: 81b28dc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch softnet at a pinned commit
+        run: |
+          git clone https://github.com/openai/softnet "$RUNNER_TEMP/softnet"
+          git -C "$RUNNER_TEMP/softnet" checkout "$SOFTNET_COMMIT"
+      - name: Run its tests against this checkout
+        working-directory: ${{ runner.temp }}/softnet
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo test --no-fail-fast --config "patch.crates-io.unix-ancillary.path=\"$GITHUB_WORKSPACE\""

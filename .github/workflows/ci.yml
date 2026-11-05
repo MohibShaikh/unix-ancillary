@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,8 +25,8 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --verbose --all-targets
-      - run: cargo test --verbose
-      - run: cargo test --verbose --all-features
+      - run: cargo test --verbose --no-fail-fast
+      - run: cargo test --verbose --all-features --no-fail-fast
       - name: Verify SIGPIPE-safe send behavior
         run: cargo test --test fd_passing send_to_closed_peer_returns_error_without_sigpipe -- --nocapture
       - name: Verify descriptor leak regressions
@@ -53,6 +53,30 @@ jobs:
       - run: cargo build --verbose --all-targets
       - run: cargo test
       - run: cargo check --all-features
+
+  msrv-fresh:
+    name: msrv (1.75, no lockfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      # What a new consumer resolves. The tokio feature needs a pin here; see README.
+      - run: rm Cargo.lock && cargo check
+
+  compile-targets:
+    name: compile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-freebsd, aarch64-linux-android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --all-features --target ${{ matrix.target }}
 
   docs:
     name: docs
