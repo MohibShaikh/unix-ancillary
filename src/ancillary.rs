@@ -14,7 +14,14 @@ impl fmt::Display for AncillaryError {
 }
 impl std::error::Error for AncillaryError {}
 
+impl From<AncillaryError> for std::io::Error {
+    fn from(err: AncillaryError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+    }
+}
+
 /// Received ancillary data from a Unix socket.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum AncillaryData<'a> {
     /// Owned descriptors. Unconsumed descriptors close when the iterator drops.
@@ -26,6 +33,7 @@ pub enum AncillaryData<'a> {
 
 /// Draining iterator over received descriptors. Each descriptor is yielded once.
 /// Dropping this iterator closes every descriptor not yet yielded.
+#[derive(Debug)]
 pub struct ScmRights<'a> {
     inner: std::vec::IntoIter<OwnedFd>,
     _marker: PhantomData<&'a ()>,
@@ -43,6 +51,7 @@ impl Iterator for ScmRights<'_> {
 
 impl ExactSizeIterator for ScmRights<'_> {}
 
+#[derive(Debug)]
 pub(crate) enum ReceivedMessage {
     Rights(Vec<OwnedFd>),
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -60,6 +69,7 @@ impl ReceivedMessage {
 }
 
 /// Drains received control messages. Dropping it closes unconsumed descriptors.
+#[derive(Debug)]
 pub struct Messages<'a> {
     inner: std::vec::Drain<'a, ReceivedMessage>,
 }
@@ -92,8 +102,8 @@ fn cmsg_space(payload_len: usize) -> Option<usize> {
     Some(unsafe { libc::CMSG_SPACE(payload_len) } as usize)
 }
 
-/// Stack space for control messages. Covers Linux's whole receive budget, so
-/// the common paths never touch the heap.
+/// Stack space for control messages. Covers every platform's receive budget, so
+/// receives never touch the heap for it.
 const STACK_CONTROL: usize = 4096;
 
 /// Run `f` with `size` zeroed bytes of cmsghdr-aligned control storage.
@@ -256,14 +266,6 @@ pub(crate) unsafe fn for_each_fd(buffer: &[u8], mut sink: impl FnMut(OwnedFd)) {
     }
 }
 
-/// The number of descriptors [`for_each_fd`] would yield, for sizing a `Vec`.
-pub(crate) fn count_rights(buffer: &[u8]) -> usize {
-    (RawMessages { remaining: buffer })
-        .filter(|message| message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS)
-        .map(|message| message.rights().count())
-        .sum()
-}
-
 /// Caller-provided storage for sending or receiving ancillary messages.
 ///
 /// Send descriptors remain borrowed until this buffer is dropped. Received
@@ -273,6 +275,7 @@ pub(crate) fn count_rights(buffer: &[u8]) -> usize {
 ///
 /// After receiving, call [`clear`](Self::clear) before building a new send.
 /// Construct a separate send buffer when forwarding received descriptors.
+#[derive(Debug)]
 pub struct SocketAncillary<'a> {
     pub(crate) buffer: &'a mut [u8],
     pub(crate) length: usize,

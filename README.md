@@ -83,7 +83,7 @@ processes retain their normal OS permissions; this example does not sandbox them
 - `recv_fds_exact` / `recv_fds_exact_into`: reject fewer or more than `N` descriptors
   in this receive, closing the entire batch and discarding its bytes on mismatch.
   This does not wait for later stream bytes or descriptors to complete a message.
-  With `N > 0`, a closed peer is `UnexpectedEof`.
+  With `N > 0` and room in the data buffer, a closed peer is `UnexpectedEof`.
 - Convenience datagram receives reject payload truncation with `InvalidData`.
   All convenience receives reject ancillary truncation with `InvalidData`.
 - Vectored methods are available on both blocking traits, the async stream trait
@@ -116,10 +116,32 @@ assert_eq!(fds.len(), 1);
 ## Seqpacket
 
 `unix_ancillary::seqpacket` has the same operations as free functions over any
-connected `SOCK_SEQPACKET` socket that is `AsFd`, and `seqpacket::tokio` has async
-forms over `AsyncFd`, and `seqpacket::pair` makes a connected pair. Messages keep their boundaries, so an empty payload can carry
-descriptors, and a payload too long for the buffer is `InvalidData`. Tests run on
-Linux. macOS has no `AF_UNIX` `SOCK_SEQPACKET`.
+connected `SOCK_SEQPACKET` socket that is `AsFd`. `seqpacket::tokio` has async forms
+over `AsyncFd`, and `seqpacket::pair` makes a connected pair. Messages keep their
+boundaries, so an empty payload can carry descriptors, and a payload too long for
+the buffer is `InvalidData`. A closed peer looks like an empty message, so
+`recv_fds_exact` reports it as `InvalidData`, not `UnexpectedEof`. Tests run on Linux.
+macOS has no `AF_UNIX` `SOCK_SEQPACKET`.
+
+## Sockets that are not connected
+
+`send_fds_to` takes a destination, and `recv_fds_from` also returns who sent the
+message, or `None` for a sender that never called `bind`:
+
+```rust,ignore
+use std::os::unix::net::{SocketAddr, UnixDatagram};
+use unix_ancillary::{recv_fds_from, send_fds_to};
+
+let sock = UnixDatagram::unbound()?;
+let service = SocketAddr::from_pathname("/run/service.sock")?;
+send_fds_to(&sock, &service, b"hello", &[&file])?;
+
+let (mut data, mut slots) = ([0u8; 64], [None]);
+let (got, sender) = recv_fds_from(&server, &mut data, &mut slots)?;
+```
+
+Paths work everywhere, and abstract names work on Linux and Android. Both functions
+take anything that is `AsFd`, so they run on a tokio socket inside `async_io`.
 
 ## Low-level ancillary data
 
@@ -162,9 +184,9 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
 - Sends suppress SIGPIPE on Linux/Android/BSD with `MSG_NOSIGNAL` and on Apple
   with `SO_NOSIGPIPE`. Other Unix targets use a fallback without this guarantee.
 - Linux/Android convenience receives reserve space for 253 descriptors plus
-  credentials. BSD uses a 253-descriptor budget. macOS reserves 254, the most XNU
-  accepts in one message. These budgets do not make truncation impossible;
-  applications must handle receive errors.
+  credentials. macOS reserves 254, the most XNU accepts in one message. Elsewhere
+  the budget is what you asked for, from 253 to 1000. These budgets do not make
+  truncation impossible; applications must handle receive errors.
 - Every descriptor delivered in the control buffer is owned and cleaned up.
   Kernel handling of descriptors omitted by truncation is platform-specific;
   userspace cannot close descriptor numbers it was not given.
@@ -172,15 +194,17 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
   the `EINVAL` that `SO_NOSIGPIPE` returns on such a socket.
 - CI executes tests on Linux and macOS, and compiles FreeBSD and Android without
   running them. Nothing in CI checks kernel behavior on a BSD or on Android.
-  OpenBSD, NetBSD and DragonFly are not compiled in CI.
+  CI also compiles NetBSD and illumos. OpenBSD and DragonFly are not compiled in CI.
 
 ## Cost
 
 A send allocates nothing. A receive allocates its returned `Vec` when descriptors
-arrive and nothing when none do; `recv_fds` also allocates its data buffer.
-`recv_fds_slots` never allocates: it fills a slice you own, and it works on tokio
-sockets inside `async_io`. Control storage stays on the stack up to 4 KiB. macOS
-also pays one `setsockopt` per send and one `fcntl` per received descriptor.
+arrive and nothing when none do. `recv_fds` also allocates a `Vec` the size of the
+message, and keeps one receive buffer per thread: 4 KiB for streams, 64 KiB for
+datagrams and seqpacket. `recv_fds_slots` never allocates: it fills a slice you
+own, and it works on tokio sockets inside `async_io`. Control storage stays on the
+stack. macOS also pays one `setsockopt` per send and one `fcntl` per received
+descriptor.
 `tests/allocations.rs` checks these counts on Linux.
 
 ## Verification

@@ -84,3 +84,105 @@ fn small_datagram_does_not_keep_the_whole_receive_buffer() {
         received.data.capacity()
     );
 }
+
+#[test]
+fn would_block_partway_reports_how_much_went_and_can_finish() {
+    use std::os::fd::BorrowedFd;
+    use std::sync::mpsc;
+    use unix_ancillary::PartialSend;
+
+    let (tx, rx) = UnixStream::pair().unwrap();
+    tx.set_nonblocking(true).unwrap();
+    let file = tempfile::tempfile().unwrap();
+    let payload = vec![7u8; 8 << 20];
+
+    let err = tx.send_fds_all(&payload, &[&file]).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::WouldBlock);
+    let sent = err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<PartialSend>())
+        .expect("payload says how much went")
+        .sent;
+    assert!(sent > 0 && sent < payload.len(), "{sent}");
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut data = vec![0u8; 1 << 16];
+        let (mut total, mut fds) = (0, 0);
+        while total < 8 << 20 {
+            let (n, got) = rx.recv_fds_into::<2>(&mut data).unwrap();
+            total += n;
+            fds += got.len();
+        }
+        done_tx.send((total, fds)).unwrap();
+    });
+    tx.set_nonblocking(false).unwrap();
+    tx.send_fds_all(&payload[sent..], &[] as &[BorrowedFd])
+        .unwrap();
+    reader.join().unwrap();
+    assert_eq!(done_rx.recv().unwrap(), (8 << 20, 1));
+}
+
+#[test]
+fn slots_vectored_fills_buffers_in_order_and_refuses_other_flags() {
+    use unix_ancillary::recv_fds_slots_vectored;
+
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"hello", &[&file, &file]).unwrap();
+
+    let (mut head, mut tail) = ([0u8; 2], [0u8; 8]);
+    let mut slots = [None];
+    let got = recv_fds_slots_vectored(
+        &rx,
+        &mut [IoSliceMut::new(&mut head), IoSliceMut::new(&mut tail)],
+        &mut slots,
+        libc::MSG_DONTWAIT,
+    )
+    .unwrap();
+    assert_eq!((got.bytes_read, got.fds, got.surplus_closed), (5, 1, 1));
+    assert_eq!((&head[..], &tail[..3]), (&b"he"[..], &b"llo"[..]));
+    assert!(slots[0].is_some());
+
+    let err = recv_fds_slots_vectored(
+        &rx,
+        &mut [IoSliceMut::new(&mut head)],
+        &mut slots,
+        libc::MSG_PEEK,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(slots[0].is_none());
+}
+
+#[test]
+fn would_block_on_empty_slots_vectored_receive() {
+    use unix_ancillary::recv_fds_slots_vectored;
+    let (_tx, rx) = UnixStream::pair().unwrap();
+    let mut data = [0u8; 1];
+    let err = recv_fds_slots_vectored(
+        &rx,
+        &mut [IoSliceMut::new(&mut data)],
+        &mut [None],
+        libc::MSG_DONTWAIT,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::WouldBlock);
+}
+
+#[test]
+fn ancillary_errors_convert_for_question_mark() {
+    fn add<'a>(
+        ancillary: &mut SocketAncillary<'a>,
+        file: &'a std::fs::File,
+    ) -> std::io::Result<()> {
+        ancillary.add_fds(&[file.as_fd()])?;
+        Ok(())
+    }
+    let file = tempfile::tempfile().unwrap();
+    let mut storage = [0u8; 0];
+    let mut ancillary = SocketAncillary::new(&mut storage);
+    let err = add(&mut ancillary, &file).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(!format!("{ancillary:?}").is_empty());
+}

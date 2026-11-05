@@ -6,61 +6,26 @@
 //! everything else (notably macOS), where we must `fcntl(F_SETFD, FD_CLOEXEC)`
 //! after the syscall.
 //!
-//! The macOS fallback ([`fallback`]) is written against plain `fcntl`/
-//! `getrlimit`, which behave identically on Linux — nothing in it is
-//! Darwin-specific, it is merely *selected out* on kernels that offer
-//! `MSG_CMSG_CLOEXEC`. It is compiled on every platform so its logic can be
-//! unit-tested anywhere (see the tests at the bottom of this file), even
-//! though only non-`MSG_CMSG_CLOEXEC` targets wire it into the recv path.
+//! Nothing in the `fcntl` path ([`fallback`]) is Darwin-specific, so it compiles
+//! everywhere and the tests at the bottom of this file run it on Linux.
 
-/// The macOS / no-`MSG_CMSG_CLOEXEC` fallback, compiled on all platforms so it
-/// stays testable on Linux CI. Only `mod inner` on those targets calls it; on
-/// `MSG_CMSG_CLOEXEC` platforms it is reached solely from the unit tests, so
-/// suppress dead-code warnings there.
-#[cfg_attr(
-    any(
-        target_vendor = "apple",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd",
-        target_os = "dragonfly",
-        target_os = "netbsd",
-        target_os = "openbsd",
-    ),
-    allow(dead_code)
-)]
+use std::io;
+use std::os::unix::io::{OwnedFd, RawFd};
+
+#[allow(dead_code)]
 pub(crate) mod fallback {
     use std::io;
-    use std::mem;
-    use std::os::unix::io::RawFd;
-
-    fn set_cloexec(fd: RawFd) -> io::Result<()> {
-        // SAFETY: F_SETFD on a kernel-supplied fd is always defined. A freshly
-        // received descriptor has no other flags to preserve.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
+    use std::os::fd::{AsRawFd, OwnedFd};
 
     /// Apply CLOEXEC to already-owned descriptors. The caller drops the whole
     /// batch on failure, closing processed and unprocessed descriptors alike.
-    pub(crate) fn cloexec_received(
-        messages: &[crate::ancillary::ReceivedMessage],
-    ) -> io::Result<()> {
-        for message in messages {
-            cloexec_fds(message.fds())?;
-        }
-        Ok(())
-    }
-
-    /// Flat-list form of [`cloexec_received`], with the same batch contract.
-    pub(crate) fn cloexec_fds<'a>(
-        fds: impl IntoIterator<Item = &'a std::os::fd::OwnedFd>,
-    ) -> io::Result<()> {
-        use std::os::fd::AsRawFd;
+    pub(crate) fn cloexec_fds<'a>(fds: impl IntoIterator<Item = &'a OwnedFd>) -> io::Result<()> {
         for fd in fds {
-            set_cloexec(fd.as_raw_fd())?;
+            // SAFETY: F_SETFD on a kernel-supplied fd is always defined. A freshly
+            // received descriptor has no other flags to preserve.
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     }
@@ -76,43 +41,10 @@ pub(crate) mod fallback {
             err
         }
     }
-
-    /// Hard ceiling on the dynamic cap to bound buffer size against bogus or
-    /// `RLIM_INFINITY` values. 1M fds × 4 bytes ≈ 4 MiB cmsg buffer. This is
-    /// used as an allocation budget, not a proof against kernel truncation.
-    pub(crate) const HARD_CEILING: usize = 1 << 20;
-
-    /// Floor — never go below the Linux-style 253 cap so behaviour stays
-    /// consistent across platforms when `getrlimit` returns nonsense.
-    pub(crate) const HARD_FLOOR: usize = 253;
-
-    /// Clamp a raw `RLIMIT_NOFILE` current value into `[HARD_FLOOR,
-    /// HARD_CEILING]`, mapping `RLIM_INFINITY` and any unrepresentable value
-    /// to the ceiling. Pure — the buffer-sizing policy, split out so it is
-    /// testable without a live `getrlimit`.
-    pub(crate) fn clamp_nofile(cur: libc::rlim_t) -> usize {
-        let n: usize = if cur == libc::RLIM_INFINITY {
-            HARD_CEILING
-        } else {
-            usize::try_from(cur).unwrap_or(HARD_CEILING)
-        };
-        n.clamp(HARD_FLOOR, HARD_CEILING)
-    }
-
-    /// Receive allocation budget derived from RLIMIT_NOFILE and clamped to
-    /// bound per-call memory use. Reported truncation remains an error.
-    pub(crate) fn max_recv_fds() -> usize {
-        // SAFETY: getrlimit with a writable rlimit out-pointer is always
-        // defined; we treat any failure as "fall back to a safe default".
-        let mut rlim: libc::rlimit = unsafe { mem::zeroed() };
-        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
-        if rc < 0 {
-            return HARD_CEILING;
-        }
-        clamp_nofile(rlim.rlim_cur)
-    }
 }
 
+/// `MSG_CMSG_CLOEXEC` sets `FD_CLOEXEC` atomically. `MSG_NOSIGNAL` turns the
+/// `SIGPIPE` of a write to a closed peer into `EPIPE`.
 #[cfg(any(
     target_os = "linux",
     target_os = "android",
@@ -121,48 +53,15 @@ pub(crate) mod fallback {
     target_os = "netbsd",
     target_os = "openbsd",
 ))]
-mod inner {
-    use std::io;
-
-    /// Flags passed to `recvmsg`. On supported platforms we ask the kernel to
-    /// set `FD_CLOEXEC` atomically.
+mod flags {
     pub(crate) const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
-
-    /// Flags passed to `sendmsg`. `MSG_NOSIGNAL` suppresses the `SIGPIPE`
-    /// that a write to a closed peer would otherwise raise, turning it into
-    /// an `EPIPE` error instead.
     pub(crate) const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
-
-    /// No-op on platforms with `MSG_NOSIGNAL` — the flag handles it.
-    #[inline]
-    pub(crate) fn prepare_send(_fd: std::os::unix::io::RawFd) -> io::Result<()> {
-        Ok(())
-    }
-
-    /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
-    #[inline]
-    pub(crate) fn cloexec_received(
-        _messages: &[crate::ancillary::ReceivedMessage],
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
-    #[inline]
-    pub(crate) fn cloexec_fds<'a>(
-        _fds: impl IntoIterator<Item = &'a std::os::fd::OwnedFd>,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    /// Linux/Android SCM_MAX_FD and the default receive budget on BSD.
-    /// BSD kernel limits may differ; truncation must still be handled.
-    #[inline]
-    pub(crate) fn max_recv_fds() -> usize {
-        253
-    }
 }
 
+/// macOS and others lack both. Close-on-exec comes from `fcntl` after the receive,
+/// accepting the brief inherit-across-exec race. Apple suppresses `SIGPIPE` through
+/// [`prepare_send`]. Other targets (illumos, Solaris, AIX) have no portable way, so
+/// their applications must ignore or handle `SIGPIPE`.
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
@@ -171,103 +70,69 @@ mod inner {
     target_os = "netbsd",
     target_os = "openbsd",
 )))]
-mod inner {
-    /// Flags passed to `recvmsg`. macOS et al. don't support
-    /// `MSG_CMSG_CLOEXEC`; we set it via `fcntl` post-recv, accepting the
-    /// brief inherit-across-exec race.
+mod flags {
     pub(crate) const RECV_FLAGS: libc::c_int = 0;
-
-    pub(crate) use super::fallback::{cloexec_fds, cloexec_received};
-
-    /// XNU refuses a control message that needs more than `MCLBYTES` once its
-    /// descriptors expand to pointers (`sockargs`, bsd/kern/uipc_syscalls.c),
-    /// which is 254 descriptors. No single message can carry more.
-    #[cfg(target_vendor = "apple")]
-    #[inline]
-    pub(crate) fn max_recv_fds() -> usize {
-        254
-    }
-
-    #[cfg(not(target_vendor = "apple"))]
-    pub(crate) use super::fallback::max_recv_fds;
-
-    #[cfg(target_vendor = "apple")]
-    mod send_flags {
-        use std::io;
-        use std::mem;
-        use std::os::unix::io::RawFd;
-
-        /// Flags passed to `sendmsg` on Apple platforms. macOS lacks
-        /// `MSG_NOSIGNAL`, so `SO_NOSIGPIPE` is set once per send instead
-        /// (see [`prepare_send`]).
-        pub(crate) const SEND_FLAGS: libc::c_int = 0;
-
-        /// Suppress `SIGPIPE` on Apple platforms via `SO_NOSIGPIPE`. This
-        /// costs one extra syscall per send because the extension traits hold
-        /// no per-socket state.
-        pub(crate) fn prepare_send(fd: RawFd) -> io::Result<()> {
-            let on: libc::c_int = 1;
-            // SAFETY: fd is a live socket; setsockopt is always defined and
-            // we propagate any errno the kernel returns.
-            let ret = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_NOSIGPIPE,
-                    (&on as *const libc::c_int).cast(),
-                    mem::size_of_val(&on) as libc::socklen_t,
-                )
-            };
-            if ret < 0 {
-                Err(crate::platform::fallback::nosigpipe_error(
-                    io::Error::last_os_error(),
-                ))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    /// Unknown Unix targets (illumos, Solaris, AIX) have no portable
-    /// `sendmsg` signal suppression in libc. Sends are not `SIGPIPE`-safe;
-    /// set `SIGPIPE` to `SIG_IGN` (or handle it) in your process, or the
-    /// kernel may terminate it on a write to a closed peer.
-    #[cfg(not(target_vendor = "apple"))]
-    mod send_flags {
-        use std::io;
-        use std::os::unix::io::RawFd;
-
-        pub(crate) const SEND_FLAGS: libc::c_int = 0;
-
-        pub(crate) fn prepare_send(_fd: RawFd) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    pub(crate) use send_flags::{prepare_send, SEND_FLAGS};
+    pub(crate) const SEND_FLAGS: libc::c_int = 0;
 }
 
-pub(crate) use inner::*;
+pub(crate) use flags::{RECV_FLAGS, SEND_FLAGS};
+
+/// Set close-on-exec on received descriptors, if the kernel has not already.
+pub(crate) fn cloexec_fds<'a>(fds: impl IntoIterator<Item = &'a OwnedFd>) -> io::Result<()> {
+    if RECV_FLAGS == 0 {
+        return fallback::cloexec_fds(fds);
+    }
+    Ok(())
+}
+
+/// Suppress `SIGPIPE` through `SO_NOSIGPIPE`. This costs one extra syscall per
+/// send because the extension traits hold no per-socket state.
+#[cfg(target_vendor = "apple")]
+pub(crate) fn prepare_send(fd: RawFd) -> io::Result<()> {
+    let on: libc::c_int = 1;
+    // SAFETY: fd is a live socket; setsockopt is always defined and we propagate
+    // any errno the kernel returns.
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&on as *const libc::c_int).cast(),
+            std::mem::size_of_val(&on) as libc::socklen_t,
+        )
+    };
+    if ret < 0 {
+        return Err(fallback::nosigpipe_error(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_vendor = "apple"))]
+pub(crate) fn prepare_send(_fd: RawFd) -> io::Result<()> {
+    Ok(())
+}
+
+/// Descriptors to make room for when a receive wants `wanted`.
+///
+/// Linux and Android carry at most `SCM_MAX_FD`, 253, per message. XNU refuses a
+/// control message that needs more than `MCLBYTES` once its descriptors expand to
+/// pointers (`sockargs`, bsd/kern/uipc_syscalls.c), which is 254. Other kernels'
+/// limits are unverified, so honor the request as far as stack storage goes. More
+/// than that surfaces as a truncation error, not as a leak.
+pub(crate) fn recv_budget(wanted: usize) -> usize {
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        253
+    } else if cfg!(target_vendor = "apple") {
+        254
+    } else {
+        wanted.clamp(253, 1000)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::fallback;
     use std::os::unix::io::AsRawFd;
-
-    #[test]
-    fn clamp_nofile_maps_special_and_out_of_range_values() {
-        assert_eq!(fallback::clamp_nofile(0), fallback::HARD_FLOOR);
-        assert_eq!(fallback::clamp_nofile(10), fallback::HARD_FLOOR);
-        assert_eq!(fallback::clamp_nofile(1024), 1024);
-        assert_eq!(
-            fallback::clamp_nofile(libc::RLIM_INFINITY),
-            fallback::HARD_CEILING,
-        );
-        assert_eq!(
-            fallback::clamp_nofile(u64::MAX as libc::rlim_t),
-            fallback::HARD_CEILING,
-        );
-    }
 
     #[test]
     fn nosigpipe_einval_becomes_broken_pipe() {
@@ -282,7 +147,7 @@ mod tests {
     /// `MSG_CMSG_CLOEXEC` suppressed (so it arrives WITHOUT close-on-exec),
     /// then run the fcntl fallback and confirm `FD_CLOEXEC` is now set.
     #[test]
-    fn cloexec_received_sets_flag_via_fcntl() {
+    fn cloexec_fds_sets_flag_via_fcntl() {
         use crate::ancillary::SocketAncillary;
         use crate::cmsg;
         use std::io::{IoSlice, IoSliceMut};
@@ -296,7 +161,7 @@ mod tests {
         let mut anc = SocketAncillary::new(&mut sbuf);
         anc.add_fds(&[file.as_fd()]).unwrap();
         let iov = [IoSlice::new(b"x")];
-        cmsg::sendmsg_vectored(tx.as_fd(), &iov, anc.buffer, anc.length).unwrap();
+        cmsg::sendmsg_flags(tx.as_fd(), None, &iov, anc.buffer, anc.length, 0).unwrap();
 
         // Raw recvmsg with flags = 0 (NOT MSG_CMSG_CLOEXEC) so the delivered
         // fd is inheritable — the state a macOS kernel always hands back.
@@ -322,7 +187,7 @@ mod tests {
         let before = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         assert_eq!(before & libc::FD_CLOEXEC, 0, "arrived with CLOEXEC unset");
 
-        fallback::cloexec_received(&received).unwrap();
+        fallback::cloexec_fds(received.iter().flat_map(|message| message.fds())).unwrap();
 
         let after = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         assert_eq!(

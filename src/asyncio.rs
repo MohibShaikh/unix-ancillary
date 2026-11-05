@@ -19,10 +19,50 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_impl,
-    send_fds_vectored_impl, validate_stream_iov, validate_stream_send, Datagram, Exact,
-    ReceivedFds, Stream, UpTo, DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
+    recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_flags_impl,
+    send_fds_impl, validate_stream_iov, Datagram, Exact, ReceivedFds, Stream, UpTo,
+    DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
+
+/// The owned and into-buffer receives, the same on each socket type apart from
+/// its kind and default buffer size. `async_io` retries the closure until ready.
+macro_rules! recv_methods {
+    ($kind:expr, $size:expr) => {
+        async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
+            self.async_io(Interest::READABLE, || {
+                recv_owned_impl(self.as_fd(), $size, $kind, UpTo(N))
+            })
+            .await
+        }
+
+        async fn recv_fds_into<const N: usize>(
+            &self,
+            data_buf: &mut [u8],
+        ) -> io::Result<(usize, Vec<OwnedFd>)> {
+            self.async_io(Interest::READABLE, || {
+                recv_fds_into_impl(self.as_fd(), &mut *data_buf, $kind, UpTo(N))
+            })
+            .await
+        }
+
+        async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
+            self.async_io(Interest::READABLE, || {
+                recv_owned_impl(self.as_fd(), $size, $kind, Exact(N))
+            })
+            .await
+        }
+
+        async fn recv_fds_exact_into<const N: usize>(
+            &self,
+            data_buf: &mut [u8],
+        ) -> io::Result<(usize, Vec<OwnedFd>)> {
+            self.async_io(Interest::READABLE, || {
+                recv_fds_into_impl(self.as_fd(), &mut *data_buf, $kind, Exact(N))
+            })
+            .await
+        }
+    };
+}
 
 /// Async fd passing on tokio's [`UnixStream`].
 ///
@@ -103,7 +143,7 @@ impl AsyncUnixStreamExt for UnixStream {
     ) -> io::Result<usize> {
         validate_stream_iov(iov, fds.len())?;
         self.async_io(Interest::WRITABLE, || {
-            send_fds_vectored_impl(self.as_fd(), iov, fds)
+            send_fds_flags_impl(self.as_fd(), None, iov, fds, 0)
         })
         .await
     }
@@ -119,7 +159,7 @@ impl AsyncUnixStreamExt for UnixStream {
     }
 
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
-        validate_stream_send(data, fds.len())?;
+        validate_stream_iov(&[io::IoSlice::new(data)], fds.len())?;
         self.async_io(Interest::WRITABLE, || {
             send_fds_impl(self.as_fd(), data, fds)
         })
@@ -127,20 +167,14 @@ impl AsyncUnixStreamExt for UnixStream {
     }
 
     async fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()> {
-        validate_stream_send(data, fds.len())?;
+        validate_stream_iov(&[io::IoSlice::new(data)], fds.len())?;
         let mut sent = if fds.is_empty() {
             0
         } else {
-            let first = self
-                .async_io(Interest::WRITABLE, || {
-                    send_fds_impl(self.as_fd(), data, fds)
-                })
-                .await?;
-            if first == 0 {
-                let msg = "failed to send fd payload byte";
-                return Err(io::Error::new(io::ErrorKind::WriteZero, msg));
-            }
-            first
+            self.async_io(Interest::WRITABLE, || {
+                send_fds_impl(self.as_fd(), data, fds)
+            })
+            .await?
         };
         while sent < data.len() {
             let n = self
@@ -156,41 +190,7 @@ impl AsyncUnixStreamExt for UnixStream {
         Ok(())
     }
 
-    async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
-        let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        self.async_io(Interest::READABLE, || {
-            recv_owned_impl(self.as_fd(), &mut data_buf, Stream, UpTo(N))
-        })
-        .await
-    }
-
-    async fn recv_fds_into<const N: usize>(
-        &self,
-        data_buf: &mut [u8],
-    ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(self.as_fd(), &mut *data_buf, Stream, UpTo(N))
-        })
-        .await
-    }
-
-    async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
-        let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        self.async_io(Interest::READABLE, || {
-            recv_owned_impl(self.as_fd(), &mut data_buf, Stream, Exact(N))
-        })
-        .await
-    }
-
-    async fn recv_fds_exact_into<const N: usize>(
-        &self,
-        data_buf: &mut [u8],
-    ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(self.as_fd(), &mut *data_buf, Stream, Exact(N))
-        })
-        .await
-    }
+    recv_methods!(Stream, DEFAULT_STREAM_BUF);
 }
 
 /// Async fd passing on tokio's [`UnixDatagram`].
@@ -237,39 +237,5 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         .await
     }
 
-    async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
-        let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        self.async_io(Interest::READABLE, || {
-            recv_owned_impl(self.as_fd(), &mut data_buf, Datagram, UpTo(N))
-        })
-        .await
-    }
-
-    async fn recv_fds_into<const N: usize>(
-        &self,
-        data_buf: &mut [u8],
-    ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(self.as_fd(), &mut *data_buf, Datagram, UpTo(N))
-        })
-        .await
-    }
-
-    async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
-        let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        self.async_io(Interest::READABLE, || {
-            recv_owned_impl(self.as_fd(), &mut data_buf, Datagram, Exact(N))
-        })
-        .await
-    }
-
-    async fn recv_fds_exact_into<const N: usize>(
-        &self,
-        data_buf: &mut [u8],
-    ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(self.as_fd(), &mut *data_buf, Datagram, Exact(N))
-        })
-        .await
-    }
+    recv_methods!(Datagram, DEFAULT_DATAGRAM_BUF);
 }

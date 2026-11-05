@@ -2,6 +2,7 @@ use std::io;
 use std::mem;
 use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
 
+use crate::addr::RawAddr;
 use crate::platform;
 
 pub(crate) struct RecvMsgResult {
@@ -14,34 +15,28 @@ pub(crate) struct RecvMsgResult {
 /// Send ordinary bytes without ancillary data, using the same signal-safe
 /// flags and EINTR behavior as descriptor sends.
 pub(crate) fn send_bytes(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
-    let iov = [io::IoSlice::new(data)];
-    sendmsg_vectored(fd, &iov, &[], 0)
-}
-
-/// [`sendmsg_flags`] with only the platform's signal-safe flags.
-pub(crate) fn sendmsg_vectored(
-    fd: BorrowedFd<'_>,
-    iov: &[io::IoSlice<'_>],
-    ancillary_buf: &[u8],
-    ancillary_len: usize,
-) -> io::Result<usize> {
-    sendmsg_flags(fd, iov, ancillary_buf, ancillary_len, 0)
+    sendmsg_flags(fd, None, &[io::IoSlice::new(data)], &[], 0, 0)
 }
 
 /// Send data and ancillary control messages over a Unix socket.
 pub(crate) fn sendmsg_flags(
     fd: BorrowedFd<'_>,
+    addr: Option<&RawAddr>,
     iov: &[io::IoSlice<'_>],
     ancillary_buf: &[u8],
     ancillary_len: usize,
     extra_flags: libc::c_int,
 ) -> io::Result<usize> {
     // `mem::zeroed::<msghdr>()` is sound on every libc target: every field is
-    // either explicitly initialised below or unused for `sendmsg` (msg_name*,
-    // msg_flags), and any padding bytes are inert.
+    // either explicitly initialised below or unused for `sendmsg` (msg_flags),
+    // and any padding bytes are inert.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = iov.as_ptr() as *mut libc::iovec;
     msg.msg_iovlen = iov.len() as _;
+    if let Some(addr) = addr {
+        msg.msg_name = (&addr.sun as *const libc::sockaddr_un).cast_mut().cast();
+        msg.msg_namelen = addr.len;
+    }
 
     if ancillary_len > 0 {
         msg.msg_control = ancillary_buf.as_ptr() as *mut libc::c_void;
@@ -73,6 +68,7 @@ pub(crate) fn recvmsg_raw(
     iov: &mut [io::IoSliceMut<'_>],
     ancillary_buf: &mut [u8],
     extra_flags: libc::c_int,
+    mut addr: Option<&mut RawAddr>,
 ) -> io::Result<RecvMsgResult> {
     // SAFETY: same justification as sendmsg_vectored.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
@@ -80,6 +76,10 @@ pub(crate) fn recvmsg_raw(
     msg.msg_iovlen = iov.len() as _;
     msg.msg_control = ancillary_buf.as_mut_ptr() as *mut libc::c_void;
     msg.msg_controllen = ancillary_buf.len() as _;
+    if let Some(addr) = addr.as_deref_mut() {
+        msg.msg_name = (&mut addr.sun as *mut libc::sockaddr_un).cast();
+        msg.msg_namelen = addr.len;
+    }
 
     // SAFETY: msghdr fully populated; ancillary_buf borrowed mutably for the
     // syscall duration; fd is a valid descriptor.
@@ -97,6 +97,9 @@ pub(crate) fn recvmsg_raw(
         }
     };
 
+    if let Some(addr) = addr {
+        addr.len = msg.msg_namelen;
+    }
     #[allow(clippy::unnecessary_cast)]
     Ok(RecvMsgResult {
         bytes_read: ret as usize,
@@ -116,13 +119,21 @@ pub(crate) fn recv_fds(
     iov: &mut [io::IoSliceMut<'_>],
     ancillary_buf: &mut [u8],
 ) -> io::Result<(RecvMsgResult, Vec<OwnedFd>)> {
-    let result = recvmsg_raw(fd, iov, ancillary_buf, 0)?;
+    let result = recvmsg_raw(fd, iov, ancillary_buf, 0, None)?;
     // SAFETY: this is fresh, kernel-produced recvmsg output, consumed once.
     // Establish ownership before fallible CLOEXEC processing so an error drops
     // every delivered descriptor, including those not yet processed.
     let control = &ancillary_buf[..result.ancillary_len];
-    let mut fds = Vec::with_capacity(crate::ancillary::count_rights(control));
-    unsafe { crate::ancillary::for_each_fd(control, |fd| fds.push(fd)) };
+    let mut fds = Vec::new();
+    unsafe {
+        crate::ancillary::for_each_fd(control, |fd| {
+            if fds.is_empty() {
+                // Bytes over-count by the headers, which is a few slots at most.
+                fds.reserve_exact(control.len() / mem::size_of::<std::os::fd::RawFd>());
+            }
+            fds.push(fd);
+        })
+    };
     platform::cloexec_fds(&fds)?;
     Ok((result, fds))
 }
@@ -134,9 +145,11 @@ pub(crate) fn recv_fds_slots(
     iov: &mut [io::IoSliceMut<'_>],
     ancillary_buf: &mut [u8],
     slots: &mut [Option<OwnedFd>],
+    flags: libc::c_int,
+    addr: Option<&mut RawAddr>,
 ) -> io::Result<(RecvMsgResult, usize, usize)> {
     slots.fill_with(|| None);
-    let result = recvmsg_raw(fd, iov, ancillary_buf, 0)?;
+    let result = recvmsg_raw(fd, iov, ancillary_buf, flags, addr)?;
     let (mut kept, mut surplus) = (0, 0);
     // SAFETY: as in recv_fds. Each descriptor is owned as soon as it is seen.
     unsafe {

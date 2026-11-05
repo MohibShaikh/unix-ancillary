@@ -1,5 +1,57 @@
 # Changelog
 
+## [Unreleased]
+
+### Additions
+
+- `send_fds_to` and `recv_fds_from`: pass descriptors on a socket that is not
+  connected, and learn who sent them. Paths work everywhere, abstract names on
+  Linux and Android.
+- `recv_fds_slots`: receive into caller-owned slots with no allocation, on any
+  connected socket that is `AsFd`, and it reports the surplus it closed.
+- `recv_fds_slots_vectored`: the same into several buffers, with `MSG_DONTWAIT`
+  or `MSG_WAITALL`.
+- `PartialSend`: the error payload when `send_fds_all` stops with `WouldBlock`
+  after the descriptors went, saying how many bytes went with them. A retry of the
+  whole call would have sent the descriptors twice, with no way to know.
+- `seqpacket::pair`, `send_fds_vectored`, `recv_fds_vectored`, `recv_fds_exact` and
+  async `recv_fds`. Seqpacket sends now set `MSG_EOR`.
+- `cmsg_sendmsg_with_flags` and `cmsg_recvmsg_with_flags`, limited to flags that
+  cannot break descriptor ownership.
+- `From<AncillaryError> for io::Error`, so `?` works on `add_fds`.
+- `ScmRights` implements `ExactSizeIterator`. `SocketAncillary`, `Messages`,
+  `AncillaryData` and `ScmRights` implement `Debug`.
+
+### Fixes
+
+- A huge `N` on a receive no longer panics. `recv_fds_into::<{ usize::MAX }>` is
+  a normal receive.
+- `recv_fds_slots` no longer allocates with more than about 1,000 slots, as the docs
+  always claimed.
+- `cmsg_recvmsg_with_flags` closes unread descriptors when it rejects a flag, as
+  the docs for `cmsg_recvmsg` promise.
+- Sending more descriptors than one message can hold says so, instead of a bare
+  `Invalid argument`. The error kind is still `InvalidInput`.
+- Correct the docs on `SIGPIPE` safety, which does not hold on illumos and Solaris.
+
+### Performance
+
+- `recv_fds` and `recv_fds_exact` read into a per-thread buffer and copy out what
+  arrived. A small datagram no longer pays to zero 64 KiB, or keeps that much alive
+  in the returned `Vec`.
+- macOS sets close-on-exec with one `fcntl` per descriptor instead of two.
+- A low-level receive allocates once per rights message at any descriptor count.
+
+### Behavior changes
+
+- `recv_fds_exact` and its variants return `UnexpectedEof` instead of `InvalidData`
+  when a stream ends with `N > 0`, so a clean close is no longer mistaken for a bad
+  peer. Count mismatches are still `InvalidData`.
+- Receives no longer size control storage from `RLIMIT_NOFILE`, which removes one
+  `getrlimit` per receive and a heap buffer of up to 4 MiB. macOS reserves XNU's limit
+  of 254 descriptors. Targets other than Linux, Android and Apple make room for what
+  was asked, from 253 to 1000. A larger message there is a truncation error.
+
 ## [0.6.2] - 2026-11-05
 
 ### Fixes
@@ -19,8 +71,6 @@
 
 ### Performance
 
-- macOS sets close-on-exec with one `fcntl` per descriptor instead of two.
-- A low-level receive allocates once per rights message at any descriptor count.
 - `send_fds` and low-level sends no longer allocate. `recv_fds_into` went from 4
   allocations to 1 with descriptors, and from 1 to 0 without. Measured on Linux
   x86-64 for one descriptor.
@@ -31,21 +81,6 @@
   forms under the `tokio` feature.
 - `cmsg_recvmsg_peek` on Linux and Android.
 - `ReceivedFds::surplus_closed`.
-- `recv_fds_slots`: receive into caller-owned slots with no allocation, on any
-  connected socket that is `AsFd`, and it reports the surplus it closed.
-- `seqpacket::pair`, `send_fds_vectored`, `recv_fds_vectored` and `recv_fds_exact`.
-  Seqpacket sends now set `MSG_EOR`.
-- `cmsg_sendmsg_with_flags` and `cmsg_recvmsg_with_flags`, limited to flags that
-  cannot break descriptor ownership.
-- `ScmRights` implements `ExactSizeIterator`.
-
-### Behavior changes
-
-- `recv_fds_exact` and its variants return `UnexpectedEof` instead of `InvalidData`
-  when a stream ends with `N > 0`, so a clean close is no longer mistaken for a bad
-  peer. Count mismatches are still `InvalidData`.
-- macOS receives reserve XNU's 254-descriptor message limit instead of a budget from
-  `RLIMIT_NOFILE`, which removes one `getrlimit` per receive and the heap buffer.
 
 ## [0.6.1] - 2026-10-08
 

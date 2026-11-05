@@ -14,12 +14,9 @@ use std::os::unix::io::{AsFd, OwnedFd};
 
 use crate::ext::{
     recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_flags_impl,
-    Datagram, Exact, UpTo,
+    Datagram, Exact, UpTo, DEFAULT_DATAGRAM_BUF,
 };
 use crate::ReceivedFds;
-
-/// Longest payload [`recv_fds`] accepts: the 64 KiB datagram default.
-const DEFAULT_BUF: usize = crate::ext::DEFAULT_DATAGRAM_BUF;
 
 /// Create a connected pair with close-on-exec set. Use `UnixDatagram::from` on
 /// an end when you need `set_nonblocking`.
@@ -55,7 +52,7 @@ pub fn send_fds_vectored(
     iov: &[io::IoSlice<'_>],
     fds: &[impl AsFd],
 ) -> io::Result<usize> {
-    send_fds_flags_impl(sock.as_fd(), iov, fds, libc::MSG_EOR)
+    send_fds_flags_impl(sock.as_fd(), None, iov, fds, libc::MSG_EOR)
 }
 
 /// Receive one message into several buffers and up to `N` descriptors. Returns
@@ -68,11 +65,12 @@ pub fn recv_fds_vectored<const N: usize>(
     recv_fds_into_vectored_impl(sock.as_fd(), iov, Datagram, UpTo(N))
 }
 
-/// Receive one message and up to `N` descriptors, closing any surplus.
-/// A closed peer returns an empty result.
+/// Receive one message of up to 64 KiB and up to `N` descriptors, closing any
+/// surplus.
+/// A closed peer returns an empty result, the same as an empty message from a
+/// live peer.
 pub fn recv_fds<const N: usize>(sock: &impl AsFd) -> io::Result<ReceivedFds> {
-    let mut data_buf = vec![0u8; DEFAULT_BUF];
-    recv_owned_impl(sock.as_fd(), &mut data_buf, Datagram, UpTo(N))
+    recv_owned_impl(sock.as_fd(), DEFAULT_DATAGRAM_BUF, Datagram, UpTo(N))
 }
 
 /// Like [`recv_fds`], but into a caller-supplied buffer. Returns `(bytes_read, fds)`.
@@ -84,9 +82,10 @@ pub fn recv_fds_into<const N: usize>(
 }
 
 /// Like [`recv_fds`], but `InvalidData` unless exactly `N` descriptors arrived.
+/// That includes a closed peer: unlike a stream, a zero-length read here does not
+/// have to mean end of stream, so this is not `UnexpectedEof`.
 pub fn recv_fds_exact<const N: usize>(sock: &impl AsFd) -> io::Result<ReceivedFds> {
-    let mut data_buf = vec![0u8; DEFAULT_BUF];
-    recv_owned_impl(sock.as_fd(), &mut data_buf, Datagram, Exact(N))
+    recv_owned_impl(sock.as_fd(), DEFAULT_DATAGRAM_BUF, Datagram, Exact(N))
 }
 
 /// Like [`recv_fds_into`], but `InvalidData` unless exactly `N` descriptors arrived.
@@ -113,7 +112,17 @@ pub mod tokio {
     ) -> io::Result<usize> {
         let iov = [io::IoSlice::new(data)];
         sock.async_io(Interest::WRITABLE, |s| {
-            send_fds_flags_impl(s.as_fd(), &iov, fds, libc::MSG_EOR)
+            send_fds_flags_impl(s.as_fd(), None, &iov, fds, libc::MSG_EOR)
+        })
+        .await
+    }
+
+    /// Async [`recv_fds`](super::recv_fds).
+    pub async fn recv_fds<const N: usize, T: AsFd + std::os::fd::AsRawFd>(
+        sock: &AsyncFd<T>,
+    ) -> io::Result<ReceivedFds> {
+        sock.async_io(Interest::READABLE, |s| {
+            recv_owned_impl(s.as_fd(), DEFAULT_DATAGRAM_BUF, Datagram, UpTo(N))
         })
         .await
     }

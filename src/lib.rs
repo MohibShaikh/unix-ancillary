@@ -18,10 +18,11 @@
 //! Convenience receives reject ancillary truncation and datagram payload
 //! truncation with `InvalidData`, closing every descriptor delivered in the
 //! control buffer. Linux/Android reserve room for 253 descriptors plus sender
-//! credentials. BSD uses a 253-descriptor receive budget; this is not a claim
-//! about every BSD kernel's maximum. macOS reserves XNU's limit of 254
-//! descriptors per message. Additional control messages, a full fd table or
-//! platform limits can still cause truncation; callers must handle the error.
+//! credentials, and macOS for 254, each kernel's limit for one message. Elsewhere
+//! the budget is at least 253 and at most 1000, which is not a claim about any
+//! kernel's maximum. Additional control messages or a full fd table can still
+//! cause truncation: on Linux, a socket with both `SO_PASSCRED` and `SO_PASSPIDFD`
+//! set fails from 249 descriptors. Callers must handle the error.
 //!
 //! Low-level [`cmsg_recvmsg`] exposes truncation flags and owns the delivered
 //! descriptors even when truncated, including on Apple kernels, which report a
@@ -76,8 +77,10 @@
 //! - Datagram methods reject payload truncation with `InvalidData`; use
 //!   [`cmsg_recvmsg`] to inspect a truncated datagram via
 //!   [`RecvResult::data_truncated`].
-//! - Sends are `SIGPIPE`-safe (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`) and retry
-//!   internally on `EINTR`.
+//! - Sends retry internally on `EINTR` and are `SIGPIPE`-safe on Linux, Android,
+//!   the BSDs and Apple platforms, through `MSG_NOSIGNAL` or `SO_NOSIGPIPE`. Other
+//!   Unix targets, such as illumos and Solaris, have neither: ignore or handle
+//!   `SIGPIPE` there.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../MIGRATION.md")]
@@ -85,6 +88,7 @@
 #[cfg(not(unix))]
 compile_error!("unix-ancillary only supports Unix platforms");
 
+mod addr;
 mod ancillary;
 #[cfg(feature = "tokio")]
 mod asyncio;
@@ -95,10 +99,14 @@ mod ext;
 mod platform;
 pub mod seqpacket;
 
+pub use addr::{recv_fds_from, send_fds_to};
 pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use credentials::{passcred, set_passcred, ScmCredentials};
-pub use ext::{recv_fds_slots, ReceivedFds, RecvSlots, UnixDatagramExt, UnixStreamExt};
+pub use ext::{
+    recv_fds_slots, recv_fds_slots_vectored, PartialSend, ReceivedFds, RecvSlots, UnixDatagramExt,
+    UnixStreamExt,
+};
 
 #[cfg(feature = "tokio")]
 pub use asyncio::{AsyncUnixDatagramExt, AsyncUnixStreamExt};
@@ -108,6 +116,9 @@ pub use ancillary::__fuzz_parse;
 
 use std::io;
 use std::os::unix::io::BorrowedFd;
+
+/// `recvmsg` flags that cannot break descriptor ownership.
+const RECV_FLAGS_ALLOWED: libc::c_int = libc::MSG_DONTWAIT | libc::MSG_WAITALL;
 
 /// Result returned by [`cmsg_recvmsg`].
 #[derive(Debug, Clone, Copy)]
@@ -160,7 +171,7 @@ fn send_from_ancillary(
         let msg = "clear the receive buffer before building a send";
         return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
     }
-    cmsg::sendmsg_flags(fd, iov, ancillary.buffer, ancillary.length, flags)
+    cmsg::sendmsg_flags(fd, None, iov, ancillary.buffer, ancillary.length, flags)
 }
 
 /// [`cmsg_recvmsg`] with extra `recvmsg` flags: `MSG_DONTWAIT` and `MSG_WAITALL`.
@@ -174,16 +185,15 @@ pub fn cmsg_recvmsg_with_flags(
     ancillary: &mut SocketAncillary<'_>,
     flags: libc::c_int,
 ) -> io::Result<RecvResult> {
-    allow_flags(flags, libc::MSG_DONTWAIT | libc::MSG_WAITALL)?;
+    ancillary.clear();
+    allow_flags(flags, RECV_FLAGS_ALLOWED)?;
     recv_into_ancillary(fd, iov, ancillary, flags)
 }
 
 fn allow_flags(flags: libc::c_int, allowed: libc::c_int) -> io::Result<()> {
     if flags & !allowed != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "unsupported socket flag",
-        ));
+        let msg = "unsupported socket flag";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
     }
     Ok(())
 }
@@ -229,7 +239,7 @@ fn recv_into_ancillary(
 ) -> io::Result<RecvResult> {
     ancillary.clear();
     ancillary.receive_mode = true;
-    let result = cmsg::recvmsg_raw(fd, iov, ancillary.buffer, extra_flags)?;
+    let result = cmsg::recvmsg_raw(fd, iov, ancillary.buffer, extra_flags, None)?;
     // SAFETY: this is fresh, kernel-produced recvmsg output, consumed once.
     // Establish ownership before fallible CLOEXEC processing so an error drops
     // every delivered descriptor, including those not yet processed.
@@ -239,7 +249,8 @@ fn recv_into_ancillary(
             &mut ancillary.received,
         );
     }
-    if let Err(err) = platform::cloexec_received(&ancillary.received) {
+    let received = ancillary.received.iter().flat_map(|message| message.fds());
+    if let Err(err) = platform::cloexec_fds(received) {
         ancillary.received.clear();
         return Err(err);
     }
