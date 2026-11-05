@@ -5,6 +5,8 @@ use std::os::unix::net::{UnixDatagram, UnixStream};
 use crate::ancillary::{with_control, SocketAncillary};
 use crate::cmsg;
 use crate::platform;
+pub(crate) use CountMode::{Exact, UpTo};
+pub(crate) use SocketKind::{Datagram, Stream};
 
 pub(crate) const DEFAULT_STREAM_BUF: usize = 4096;
 pub(crate) const DEFAULT_DATAGRAM_BUF: usize = 65536;
@@ -28,7 +30,7 @@ pub(crate) enum CountMode {
 impl CountMode {
     fn count(self) -> usize {
         match self {
-            CountMode::UpTo(n) | CountMode::Exact(n) => n,
+            UpTo(n) | Exact(n) => n,
         }
     }
 }
@@ -100,7 +102,7 @@ pub(crate) fn iov_len(iov: &[io::IoSlice<'_>]) -> usize {
 /// Receive into `data_buf`, capping fds returned to the caller at `N`.
 ///
 /// The ancillary budget covers Linux's 253-fd limit plus automatic credentials.
-/// BSD uses the same fd budget; macOS uses a bounded RLIMIT_NOFILE estimate.
+/// BSD uses the same fd budget; macOS reserves XNU's 254-fd message limit.
 /// Any reported truncation is an error, closing all delivered descriptors.
 pub(crate) fn recv_fds_into_impl(
     fd: BorrowedFd<'_>,
@@ -148,46 +150,30 @@ fn recv_core(
     kind: SocketKind,
     mode: CountMode,
 ) -> io::Result<(usize, Vec<OwnedFd>, usize)> {
-    let cap = mode.count().max(platform::max_recv_fds());
-    let size = SocketAncillary::buffer_size_for_rights(cap);
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let size = size
-        .checked_add(SocketAncillary::buffer_size_for_credentials())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ancillary buffer size overflow",
-            )
-        })?;
-
+    let has_room = iov.iter().any(|buf| !buf.is_empty());
+    let size = recv_control_size(mode.count())?;
     let (result, mut fds) = with_control(size, |buf| cmsg::recv_fds(fd, iov, buf))?;
+    check_truncation(&result, kind)?;
 
-    if result.ancillary_truncated {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "ancillary data truncated; discard the incomplete message",
-        ));
-    }
-
-    if kind == SocketKind::Datagram && result.data_truncated {
-        // The datagram payload did not fit `data_buf`. Bytes and fds past
-        // this point are lost; closing the fds we did receive keeps the
-        // process state clean. `cmsg_recvmsg` is the only path that reports
-        // the flag instead of failing.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "datagram payload truncated before it fit the receive buffer",
-        ));
+    if let (Exact(n), Stream, 0, true, true) =
+        (mode, kind, result.bytes_read, fds.is_empty(), has_room)
+    {
+        if n > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("stream ended while expecting {n} file descriptors"),
+            ));
+        }
     }
 
     match mode {
-        CountMode::UpTo(n) => {
+        UpTo(n) => {
             // Keep first n; truncate closes the surplus `OwnedFd`s.
             let surplus = fds.len().saturating_sub(n);
             fds.truncate(n);
             Ok((result.bytes_read, fds, surplus))
         }
-        CountMode::Exact(n) => {
+        Exact(n) => {
             if fds.len() != n {
                 // Returning drops `fds`, closing every received descriptor; the
                 // caller must not observe a partial set.
@@ -202,6 +188,95 @@ fn recv_core(
             Ok((result.bytes_read, fds, 0))
         }
     }
+}
+
+/// Control storage for a receive of up to `fds` descriptors. The budget covers
+/// the kernel limit even when fewer are wanted, so surplus can be closed.
+fn recv_control_size(fds: usize) -> io::Result<usize> {
+    let size = SocketAncillary::buffer_size_for_rights(fds.max(platform::max_recv_fds()));
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let size = size
+        .checked_add(SocketAncillary::buffer_size_for_credentials())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ancillary buffer size overflow",
+            )
+        })?;
+    Ok(size)
+}
+
+/// Reject a truncated receive. Returning the error drops anything delivered.
+fn check_truncation(result: &cmsg::RecvMsgResult, kind: SocketKind) -> io::Result<()> {
+    if result.ancillary_truncated {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ancillary data truncated by too many descriptors or a full fd table; \
+             discard the incomplete message",
+        ));
+    }
+    if kind == Datagram && result.data_truncated {
+        // `cmsg_recvmsg` is the only path that reports the flag instead of failing.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "datagram payload truncated before it fit the receive buffer",
+        ));
+    }
+    Ok(())
+}
+
+/// Outcome of [`recv_fds_slots`].
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RecvSlots {
+    /// Bytes written into the data buffer.
+    pub bytes_read: usize,
+    /// Slots filled, starting from the first.
+    pub fds: usize,
+    /// Descriptors that did not fit, already closed.
+    pub surplus_closed: usize,
+}
+
+/// Receive into caller storage without allocating.
+///
+/// Works on any connected Unix socket that is `AsFd`, with the same CLOEXEC
+/// handling and truncation errors as the other receives. Existing contents of
+/// `slots` are closed first, and every slot is empty on error.
+///
+/// On a tokio socket, run it inside `async_io` so readiness is handled for you:
+///
+/// ```no_run
+/// # async fn demo(socket: tokio::net::UnixStream) -> std::io::Result<()> {
+/// use tokio::io::Interest;
+/// let (mut data, mut slots) = ([0u8; 64], [None, None]);
+/// let got = socket
+///     .async_io(Interest::READABLE, || {
+///         unix_ancillary::recv_fds_slots(&socket, &mut data, &mut slots)
+///     })
+///     .await?;
+/// # let _ = got;
+/// # Ok(())
+/// # }
+/// ```
+pub fn recv_fds_slots(
+    sock: &impl AsFd,
+    data_buf: &mut [u8],
+    slots: &mut [Option<OwnedFd>],
+) -> io::Result<RecvSlots> {
+    let mut iov = [io::IoSliceMut::new(data_buf)];
+    let size = recv_control_size(slots.len())?;
+    let (result, fds, surplus_closed) = with_control(size, |buf| {
+        cmsg::recv_fds_slots(sock.as_fd(), &mut iov, buf, slots)
+    })?;
+    if let Err(err) = check_truncation(&result, Datagram) {
+        slots.fill_with(|| None);
+        return Err(err);
+    }
+    Ok(RecvSlots {
+        bytes_read: result.bytes_read,
+        fds,
+        surplus_closed,
+    })
 }
 
 /// Extension trait for `UnixStream` adding fd-passing convenience methods.
@@ -270,9 +345,8 @@ pub trait UnixStreamExt {
     /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
     /// when the peer sends fewer or more than `N` descriptors. Surplus
     /// descriptors are still closed before the error is returned, and the
-    /// bytes from that receive are discarded. A closed peer also counts as
-    /// receiving zero descriptors, so with `N > 0` end of stream is this same
-    /// error. Use [`recv_fds`](Self::recv_fds) to tell the two apart.
+    /// bytes from that receive are discarded. With `N > 0`, a closed peer is
+    /// `UnexpectedEof` instead.
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
@@ -303,7 +377,7 @@ impl UnixStreamExt for UnixStream {
         &self,
         iov: &mut [io::IoSliceMut<'_>],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_vectored_impl(self.as_fd(), iov, SocketKind::Stream, CountMode::UpTo(N))
+        recv_fds_into_vectored_impl(self.as_fd(), iov, Stream, UpTo(N))
     }
 
     fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()> {
@@ -332,46 +406,26 @@ impl UnixStreamExt for UnixStream {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        recv_owned_impl(
-            self.as_fd(),
-            &mut data_buf,
-            SocketKind::Stream,
-            CountMode::UpTo(N),
-        )
+        recv_owned_impl(self.as_fd(), &mut data_buf, Stream, UpTo(N))
     }
 
     fn recv_fds_into<const N: usize>(
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl(
-            self.as_fd(),
-            data_buf,
-            SocketKind::Stream,
-            CountMode::UpTo(N),
-        )
+        recv_fds_into_impl(self.as_fd(), data_buf, Stream, UpTo(N))
     }
 
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        recv_owned_impl(
-            self.as_fd(),
-            &mut data_buf,
-            SocketKind::Stream,
-            CountMode::Exact(N),
-        )
+        recv_owned_impl(self.as_fd(), &mut data_buf, Stream, Exact(N))
     }
 
     fn recv_fds_exact_into<const N: usize>(
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl(
-            self.as_fd(),
-            data_buf,
-            SocketKind::Stream,
-            CountMode::Exact(N),
-        )
+        recv_fds_into_impl(self.as_fd(), data_buf, Stream, Exact(N))
     }
 }
 
@@ -437,7 +491,7 @@ impl UnixDatagramExt for UnixDatagram {
         &self,
         iov: &mut [io::IoSliceMut<'_>],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_vectored_impl(self.as_fd(), iov, SocketKind::Datagram, CountMode::UpTo(N))
+        recv_fds_into_vectored_impl(self.as_fd(), iov, Datagram, UpTo(N))
     }
 
     fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
@@ -446,45 +500,25 @@ impl UnixDatagramExt for UnixDatagram {
 
     fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        recv_owned_impl(
-            self.as_fd(),
-            &mut data_buf,
-            SocketKind::Datagram,
-            CountMode::UpTo(N),
-        )
+        recv_owned_impl(self.as_fd(), &mut data_buf, Datagram, UpTo(N))
     }
 
     fn recv_fds_into<const N: usize>(
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl(
-            self.as_fd(),
-            data_buf,
-            SocketKind::Datagram,
-            CountMode::UpTo(N),
-        )
+        recv_fds_into_impl(self.as_fd(), data_buf, Datagram, UpTo(N))
     }
 
     fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        recv_owned_impl(
-            self.as_fd(),
-            &mut data_buf,
-            SocketKind::Datagram,
-            CountMode::Exact(N),
-        )
+        recv_owned_impl(self.as_fd(), &mut data_buf, Datagram, Exact(N))
     }
 
     fn recv_fds_exact_into<const N: usize>(
         &self,
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
-        recv_fds_into_impl(
-            self.as_fd(),
-            data_buf,
-            SocketKind::Datagram,
-            CountMode::Exact(N),
-        )
+        recv_fds_into_impl(self.as_fd(), data_buf, Datagram, Exact(N))
     }
 }

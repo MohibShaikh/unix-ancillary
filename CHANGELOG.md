@@ -19,6 +19,8 @@
 
 ### Performance
 
+- macOS sets close-on-exec with one `fcntl` per descriptor instead of two.
+- A low-level receive allocates once per rights message at any descriptor count.
 - `send_fds` and low-level sends no longer allocate. `recv_fds_into` went from 4
   allocations to 1 with descriptors, and from 1 to 0 without. Measured on Linux
   x86-64 for one descriptor.
@@ -29,6 +31,18 @@
   forms under the `tokio` feature.
 - `cmsg_recvmsg_peek` on Linux and Android.
 - `ReceivedFds::surplus_closed`.
+- `recv_fds_slots`: receive into caller-owned slots with no allocation, on any
+  connected socket that is `AsFd`, and it reports the surplus it closed.
+- `seqpacket::pair`.
+- `ScmRights` implements `ExactSizeIterator`.
+
+### Behavior changes
+
+- `recv_fds_exact` and its variants return `UnexpectedEof` instead of `InvalidData`
+  when a stream ends with `N > 0`, so a clean close is no longer mistaken for a bad
+  peer. Count mismatches are still `InvalidData`.
+- macOS receives reserve XNU's 254-descriptor message limit instead of a budget from
+  `RLIMIT_NOFILE`, which removes one `getrlimit` per receive and the heap buffer.
 
 ## [0.6.1] - 2026-10-08
 

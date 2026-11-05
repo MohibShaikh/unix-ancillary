@@ -19,6 +19,7 @@
 /// suppress dead-code warnings there.
 #[cfg_attr(
     any(
+        target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
         target_os = "freebsd",
@@ -34,17 +35,10 @@ pub(crate) mod fallback {
     use std::os::unix::io::RawFd;
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {
-        // SAFETY: F_GETFD/F_SETFD on a kernel-supplied fd is always defined;
-        // we propagate any errno the kernel returns.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let ret = libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            if ret < 0 {
-                return Err(io::Error::last_os_error());
-            }
+        // SAFETY: F_SETFD on a kernel-supplied fd is always defined. A freshly
+        // received descriptor has no other flags to preserve.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }
@@ -61,7 +55,9 @@ pub(crate) mod fallback {
     }
 
     /// Flat-list form of [`cloexec_received`], with the same batch contract.
-    pub(crate) fn cloexec_fds(fds: &[std::os::fd::OwnedFd]) -> io::Result<()> {
+    pub(crate) fn cloexec_fds<'a>(
+        fds: impl IntoIterator<Item = &'a std::os::fd::OwnedFd>,
+    ) -> io::Result<()> {
         use std::os::fd::AsRawFd;
         for fd in fds {
             set_cloexec(fd.as_raw_fd())?;
@@ -153,7 +149,9 @@ mod inner {
 
     /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
     #[inline]
-    pub(crate) fn cloexec_fds(_fds: &[std::os::fd::OwnedFd]) -> io::Result<()> {
+    pub(crate) fn cloexec_fds<'a>(
+        _fds: impl IntoIterator<Item = &'a std::os::fd::OwnedFd>,
+    ) -> io::Result<()> {
         Ok(())
     }
 
@@ -179,7 +177,19 @@ mod inner {
     /// brief inherit-across-exec race.
     pub(crate) const RECV_FLAGS: libc::c_int = 0;
 
-    pub(crate) use super::fallback::{cloexec_fds, cloexec_received, max_recv_fds};
+    pub(crate) use super::fallback::{cloexec_fds, cloexec_received};
+
+    /// XNU refuses a control message that needs more than `MCLBYTES` once its
+    /// descriptors expand to pointers (`sockargs`, bsd/kern/uipc_syscalls.c),
+    /// which is 254 descriptors. No single message can carry more.
+    #[cfg(target_vendor = "apple")]
+    #[inline]
+    pub(crate) fn max_recv_fds() -> usize {
+        254
+    }
+
+    #[cfg(not(target_vendor = "apple"))]
+    pub(crate) use super::fallback::max_recv_fds;
 
     #[cfg(target_vendor = "apple")]
     mod send_flags {

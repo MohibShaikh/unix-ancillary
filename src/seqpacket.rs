@@ -6,17 +6,39 @@
 //! with descriptors may have an empty payload. A payload too long for the
 //! buffer is an `InvalidData` error, as on a datagram socket.
 //!
-//! macOS has no `AF_UNIX` `SOCK_SEQPACKET`. These functions never create a
-//! socket, so nothing here stops them working on one you already have.
+//! macOS has no `AF_UNIX` `SOCK_SEQPACKET`. [`pair`] is the only function here
+//! that creates a socket; the rest work on one you already have.
 
 use std::io;
 use std::os::unix::io::{AsFd, OwnedFd};
 
-use crate::ext::{recv_fds_into_impl, recv_owned_impl, send_fds_impl, CountMode, SocketKind};
+use crate::ext::{recv_fds_into_impl, recv_owned_impl, send_fds_impl, Datagram, Exact, UpTo};
 use crate::ReceivedFds;
 
 /// Longest payload [`recv_fds`] accepts: the 64 KiB datagram default.
 const DEFAULT_BUF: usize = crate::ext::DEFAULT_DATAGRAM_BUF;
+
+/// Create a connected pair with close-on-exec set. Use `UnixDatagram::from` on
+/// an end when you need `set_nonblocking`.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+))]
+pub fn pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0; 2];
+    let kind = libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC;
+    // SAFETY: fds has room for the two descriptors socketpair writes.
+    if unsafe { libc::socketpair(libc::AF_UNIX, kind, 0, fds.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: socketpair just returned these and nothing else owns them.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
 
 /// Send one message of `data` plus borrowed descriptors.
 pub fn send_fds(sock: &impl AsFd, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
@@ -27,12 +49,7 @@ pub fn send_fds(sock: &impl AsFd, data: &[u8], fds: &[impl AsFd]) -> io::Result<
 /// A closed peer returns an empty result.
 pub fn recv_fds<const N: usize>(sock: &impl AsFd) -> io::Result<ReceivedFds> {
     let mut data_buf = vec![0u8; DEFAULT_BUF];
-    recv_owned_impl(
-        sock.as_fd(),
-        &mut data_buf,
-        SocketKind::Datagram,
-        CountMode::UpTo(N),
-    )
+    recv_owned_impl(sock.as_fd(), &mut data_buf, Datagram, UpTo(N))
 }
 
 /// Like [`recv_fds`], but into a caller-supplied buffer. Returns `(bytes_read, fds)`.
@@ -40,12 +57,7 @@ pub fn recv_fds_into<const N: usize>(
     sock: &impl AsFd,
     data_buf: &mut [u8],
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    recv_fds_into_impl(
-        sock.as_fd(),
-        data_buf,
-        SocketKind::Datagram,
-        CountMode::UpTo(N),
-    )
+    recv_fds_into_impl(sock.as_fd(), data_buf, Datagram, UpTo(N))
 }
 
 /// Like [`recv_fds_into`], but `InvalidData` unless exactly `N` descriptors arrived.
@@ -53,12 +65,7 @@ pub fn recv_fds_exact_into<const N: usize>(
     sock: &impl AsFd,
     data_buf: &mut [u8],
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    recv_fds_into_impl(
-        sock.as_fd(),
-        data_buf,
-        SocketKind::Datagram,
-        CountMode::Exact(N),
-    )
+    recv_fds_into_impl(sock.as_fd(), data_buf, Datagram, Exact(N))
 }
 
 /// Async forms over a nonblocking socket registered with tokio's
@@ -85,12 +92,7 @@ pub mod tokio {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         sock.async_io(Interest::READABLE, |s| {
-            recv_fds_into_impl(
-                s.as_fd(),
-                &mut *data_buf,
-                SocketKind::Datagram,
-                CountMode::UpTo(N),
-            )
+            recv_fds_into_impl(s.as_fd(), &mut *data_buf, Datagram, UpTo(N))
         })
         .await
     }
@@ -101,12 +103,7 @@ pub mod tokio {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         sock.async_io(Interest::READABLE, |s| {
-            recv_fds_into_impl(
-                s.as_fd(),
-                &mut *data_buf,
-                SocketKind::Datagram,
-                CountMode::Exact(N),
-            )
+            recv_fds_into_impl(s.as_fd(), &mut *data_buf, Datagram, Exact(N))
         })
         .await
     }

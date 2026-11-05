@@ -297,3 +297,29 @@ fn recv_exact_datagram_accepts_exact_count() {
     assert_eq!(received.data, b"dg");
     assert_eq!(received.fds.len(), 2);
 }
+
+#[test]
+fn exact_receive_at_end_of_stream_is_unexpected_eof() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    drop(tx);
+    let err = rx.recv_fds_exact::<1>().unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn exact_receive_with_empty_buffer_is_not_end_of_stream() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    rx.set_nonblocking(true).unwrap();
+    tx.send_fds(b"x", &[&tempfile::tempfile().unwrap()])
+        .unwrap();
+    let err = rx.recv_fds_exact_into::<2>(&mut []).unwrap_err();
+    assert_ne!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
+fn zero_descriptor_exact_receive_at_end_of_stream_is_ok() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    drop(tx);
+    let got = rx.recv_fds_exact::<0>().unwrap();
+    assert!(got.data.is_empty() && got.fds.is_empty());
+}

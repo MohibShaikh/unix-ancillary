@@ -41,6 +41,8 @@ impl Iterator for ScmRights<'_> {
     }
 }
 
+impl ExactSizeIterator for ScmRights<'_> {}
+
 pub(crate) enum ReceivedMessage {
     Rights(Vec<OwnedFd>),
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -210,13 +212,11 @@ pub(crate) unsafe fn take_received_into(buffer: &[u8], messages: &mut Vec<Receiv
             close_pidfd(&message)
         };
         if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
-            let fds = message
-                .rights()
-                .map(|raw| {
-                    // SAFETY: guaranteed by this function's fresh-recv contract.
-                    unsafe { OwnedFd::from_raw_fd(raw) }
-                })
-                .collect();
+            let mut fds = Vec::with_capacity(message.data.len() / mem::size_of::<RawFd>());
+            fds.extend(message.rights().map(|raw| {
+                // SAFETY: guaranteed by this function's fresh-recv contract.
+                unsafe { OwnedFd::from_raw_fd(raw) }
+            }));
             messages.push(ReceivedMessage::Rights(fds));
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -234,35 +234,34 @@ pub(crate) unsafe fn take_received(buffer: &[u8]) -> Vec<ReceivedMessage> {
     messages
 }
 
-/// Own every delivered descriptor in one flat list, with no allocation when
-/// none arrived. Same purpose and contract as [`take_received_into`].
+/// Own every delivered descriptor, handing each to `sink` in order. Allocates
+/// nothing. Same purpose and contract as [`take_received_into`].
 ///
 /// # Safety
 /// Every SCM_RIGHTS and SCM_PIDFD integer must be an open descriptor newly
 /// owned by the caller.
-pub(crate) unsafe fn take_fds(buffer: &[u8]) -> Vec<OwnedFd> {
-    let is_rights = |message: &RawMessage<'_>| {
-        message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS
-    };
-    let count = (RawMessages { remaining: buffer })
-        .filter(is_rights)
-        .map(|message| message.rights().count())
-        .sum();
-    let mut fds = Vec::with_capacity(count);
+pub(crate) unsafe fn for_each_fd(buffer: &[u8], mut sink: impl FnMut(OwnedFd)) {
     for message in (RawMessages { remaining: buffer }) {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         // SAFETY: guaranteed by this function's fresh-recv contract.
         unsafe {
             close_pidfd(&message)
         };
-        if is_rights(&message) {
-            fds.extend(message.rights().map(|raw| {
+        if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
+            for raw in message.rights() {
                 // SAFETY: guaranteed by this function's fresh-recv contract.
-                unsafe { OwnedFd::from_raw_fd(raw) }
-            }));
+                sink(unsafe { OwnedFd::from_raw_fd(raw) });
+            }
         }
     }
-    fds
+}
+
+/// The number of descriptors [`for_each_fd`] would yield, for sizing a `Vec`.
+pub(crate) fn count_rights(buffer: &[u8]) -> usize {
+    (RawMessages { remaining: buffer })
+        .filter(|message| message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS)
+        .map(|message| message.rights().count())
+        .sum()
 }
 
 /// Caller-provided storage for sending or receiving ancillary messages.

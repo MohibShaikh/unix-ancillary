@@ -19,9 +19,9 @@
 //! truncation with `InvalidData`, closing every descriptor delivered in the
 //! control buffer. Linux/Android reserve room for 253 descriptors plus sender
 //! credentials. BSD uses a 253-descriptor receive budget; this is not a claim
-//! about every BSD kernel's maximum. macOS uses a bounded `RLIMIT_NOFILE`
-//! estimate. Additional control messages or platform limits can still cause
-//! truncation; callers must handle the error.
+//! about every BSD kernel's maximum. macOS reserves XNU's limit of 254
+//! descriptors per message. Additional control messages, a full fd table or
+//! platform limits can still cause truncation; callers must handle the error.
 //!
 //! Low-level [`cmsg_recvmsg`] exposes truncation flags and owns the delivered
 //! descriptors even when truncated, including on Apple kernels, which report a
@@ -98,7 +98,7 @@ pub mod seqpacket;
 pub use ancillary::{AncillaryData, AncillaryError, Messages, ScmRights, SocketAncillary};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use credentials::{passcred, set_passcred, ScmCredentials};
-pub use ext::{ReceivedFds, UnixDatagramExt, UnixStreamExt};
+pub use ext::{recv_fds_slots, ReceivedFds, RecvSlots, UnixDatagramExt, UnixStreamExt};
 
 #[cfg(feature = "tokio")]
 pub use asyncio::{AsyncUnixDatagramExt, AsyncUnixStreamExt};

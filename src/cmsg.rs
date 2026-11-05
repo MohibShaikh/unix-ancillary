@@ -108,7 +108,39 @@ pub(crate) fn recv_fds(
     // SAFETY: this is fresh, kernel-produced recvmsg output, consumed once.
     // Establish ownership before fallible CLOEXEC processing so an error drops
     // every delivered descriptor, including those not yet processed.
-    let fds = unsafe { crate::ancillary::take_fds(&ancillary_buf[..result.ancillary_len]) };
+    let control = &ancillary_buf[..result.ancillary_len];
+    let mut fds = Vec::with_capacity(crate::ancillary::count_rights(control));
+    unsafe { crate::ancillary::for_each_fd(control, |fd| fds.push(fd)) };
     platform::cloexec_fds(&fds)?;
     Ok((result, fds))
+}
+
+/// Like [`recv_fds`], but fill `slots` and close the rest. Returns the result,
+/// the number kept and the number closed. On error every slot is empty.
+pub(crate) fn recv_fds_slots(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    ancillary_buf: &mut [u8],
+    slots: &mut [Option<OwnedFd>],
+) -> io::Result<(RecvMsgResult, usize, usize)> {
+    slots.fill_with(|| None);
+    let result = recvmsg_raw(fd, iov, ancillary_buf, 0)?;
+    let (mut kept, mut surplus) = (0, 0);
+    // SAFETY: as in recv_fds. Each descriptor is owned as soon as it is seen.
+    unsafe {
+        crate::ancillary::for_each_fd(&ancillary_buf[..result.ancillary_len], |fd| {
+            match slots.get_mut(kept) {
+                Some(slot) => {
+                    *slot = Some(fd);
+                    kept += 1;
+                }
+                None => surplus += 1,
+            }
+        });
+    }
+    if let Err(err) = platform::cloexec_fds(slots.iter().flatten()) {
+        slots.fill_with(|| None);
+        return Err(err);
+    }
+    Ok((result, kept, surplus))
 }

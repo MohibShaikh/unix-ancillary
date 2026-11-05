@@ -83,7 +83,7 @@ processes retain their normal OS permissions; this example does not sandbox them
 - `recv_fds_exact` / `recv_fds_exact_into`: reject fewer or more than `N` descriptors
   in this receive, closing the entire batch and discarding its bytes on mismatch.
   This does not wait for later stream bytes or descriptors to complete a message.
-  With `N > 0`, a closed peer is the same `InvalidData` error.
+  With `N > 0`, a closed peer is `UnexpectedEof`.
 - Convenience datagram receives reject payload truncation with `InvalidData`.
   All convenience receives reject ancillary truncation with `InvalidData`.
 - Vectored methods are available on both blocking traits and the async stream
@@ -116,7 +116,7 @@ assert_eq!(fds.len(), 1);
 
 `unix_ancillary::seqpacket` has the same operations as free functions over any
 connected `SOCK_SEQPACKET` socket that is `AsFd`, and `seqpacket::tokio` has async
-forms over `AsyncFd`. Messages keep their boundaries, so an empty payload can carry
+forms over `AsyncFd`, and `seqpacket::pair` makes a connected pair. Messages keep their boundaries, so an empty payload can carry
 descriptors, and a payload too long for the buffer is `InvalidData`. Tests run on
 Linux. macOS has no `AF_UNIX` `SOCK_SEQPACKET`.
 
@@ -157,9 +157,9 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
 - Sends suppress SIGPIPE on Linux/Android/BSD with `MSG_NOSIGNAL` and on Apple
   with `SO_NOSIGPIPE`. Other Unix targets use a fallback without this guarantee.
 - Linux/Android convenience receives reserve space for 253 descriptors plus
-  credentials. BSD uses a 253-descriptor budget. macOS derives an allocation
-  budget from `RLIMIT_NOFILE`, capped at 1,048,576 descriptors. These budgets
-  do not make truncation impossible; applications must handle receive errors.
+  credentials. BSD uses a 253-descriptor budget. macOS reserves 254, the most XNU
+  accepts in one message. These budgets do not make truncation impossible;
+  applications must handle receive errors.
 - Every descriptor delivered in the control buffer is owned and cleaned up.
   Kernel handling of descriptors omitted by truncation is platform-specific;
   userspace cannot close descriptor numbers it was not given.
@@ -172,10 +172,11 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
 ## Cost
 
 A send allocates nothing. A receive allocates its returned `Vec` when descriptors
-arrive and nothing when none do; `recv_fds` also allocates its data buffer. Control
-storage stays on the stack up to 4 KiB. A macOS process with an `RLIMIT_NOFILE`
-above about 1,000 uses the heap for it, and also pays one `setsockopt` per send and
-one `getrlimit` per receive. `tests/allocations.rs` checks these counts on Linux.
+arrive and nothing when none do; `recv_fds` also allocates its data buffer.
+`recv_fds_slots` never allocates: it fills a slice you own, and it works on tokio
+sockets inside `async_io`. Control storage stays on the stack up to 4 KiB. macOS
+also pays one `setsockopt` per send and one `fcntl` per received descriptor.
+`tests/allocations.rs` checks these counts on Linux.
 
 ## Verification
 

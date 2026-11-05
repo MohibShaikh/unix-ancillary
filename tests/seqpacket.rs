@@ -78,7 +78,23 @@ fn closed_peer_is_an_empty_result() {
     assert!(received.data.is_empty() && received.fds.is_empty());
 }
 
+#[test]
+fn public_pair_is_connected_seqpacket_with_cloexec() {
+    use std::os::fd::AsRawFd;
+    let (a, b) = seqpacket::pair().unwrap();
+    // SAFETY: F_GETFD on a live descriptor.
+    let flags = unsafe { libc::fcntl(a.as_raw_fd(), libc::F_GETFD) };
+    assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+    let file = tempfile::tempfile().unwrap();
+    seqpacket::send_fds(&a, b"one", &[&file]).unwrap();
+    seqpacket::send_fds(&a, b"two", &[&file]).unwrap();
+    let mut buf = [0u8; 16];
+    let (n, fds) = seqpacket::recv_fds_exact_into::<1>(&b, &mut buf).unwrap();
+    assert_eq!((&buf[..n], fds.len()), (&b"one"[..], 1));
+}
+
 #[cfg(feature = "tokio")]
+#[allow(deprecated)] // AsyncFd::new is what the MSRV's tokio has.
 #[tokio::test]
 async fn async_forms_round_trip_after_waiting() {
     use tokio::io::unix::AsyncFd;
