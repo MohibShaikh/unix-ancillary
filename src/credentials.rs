@@ -14,9 +14,8 @@
 //! attached, and modelling it as the same variant would describe semantics
 //! that platform does not have.
 
-use std::io;
-use std::mem;
 use std::os::fd::{AsFd, AsRawFd};
+use std::{io, mem};
 
 /// Credentials of the process that sent a message.
 ///
@@ -85,22 +84,6 @@ impl ScmCredentials {
     /// Group id of the sender.
     pub fn gid(&self) -> libc::gid_t {
         self.gid
-    }
-
-    pub(crate) fn from_ucred(c: libc::ucred) -> Self {
-        ScmCredentials {
-            pid: c.pid,
-            uid: c.uid,
-            gid: c.gid,
-        }
-    }
-
-    pub(crate) fn to_ucred(self) -> libc::ucred {
-        libc::ucred {
-            pid: self.pid,
-            uid: self.uid,
-            gid: self.gid,
-        }
     }
 
     pub(crate) const SIZE: usize = mem::size_of::<libc::ucred>();

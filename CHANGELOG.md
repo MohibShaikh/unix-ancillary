@@ -14,11 +14,13 @@
 - `PartialSend`: the error payload when `send_fds_all` stops with `WouldBlock`
   after the descriptors went, saying how many bytes went with them. A retry of the
   whole call would have sent the descriptors twice, with no way to know.
-- `seqpacket::pair`, `send_fds_vectored`, `recv_fds_vectored`, `recv_fds_exact` and
-  async `recv_fds`. Seqpacket sends now set `MSG_EOR`.
+- `seqpacket::pair`, `send_fds_vectored`, `recv_fds_vectored` and `recv_fds_exact`.
+  Seqpacket sends now set `MSG_EOR`.
 - `cmsg_sendmsg_with_flags` and `cmsg_recvmsg_with_flags`, limited to flags that
   cannot break descriptor ownership.
 - `From<AncillaryError> for io::Error`, so `?` works on `add_fds`.
+- `ReceivedFds` and `RecvSlots` carry the sender's credentials on Linux and Android,
+  so `recv_fds_slots` gives descriptors and credentials with no allocation.
 - `ScmRights` implements `ExactSizeIterator`. `SocketAncillary`, `Messages`,
   `AncillaryData` and `ScmRights` implement `Debug`.
 
@@ -32,12 +34,14 @@
   the docs for `cmsg_recvmsg` promise.
 - Sending more descriptors than one message can hold says so, instead of a bare
   `Invalid argument`. The error kind is still `InvalidInput`.
-- Correct the docs on `SIGPIPE` safety, which does not hold on illumos and Solaris.
+- illumos and Solaris sends set `MSG_NOSIGNAL`. Not run on those kernels.
+- A long message on a seqpacket socket wrapped as a `UnixStream` is `InvalidData`
+  instead of silently losing the rest of the payload.
 
 ### Performance
 
-- `recv_fds` and `recv_fds_exact` read into a per-thread buffer and copy out what
-  arrived. A small datagram no longer pays to zero 64 KiB, or keeps that much alive
+- `recv_fds` and `recv_fds_exact` read into a per-thread buffer, copy out what
+  arrived and clear it. A small datagram no longer pays to zero 64 KiB, or keeps that much alive
   in the returned `Vec`.
 - macOS sets close-on-exec with one `fcntl` per descriptor instead of two.
 - A low-level receive allocates once per rights message at any descriptor count.

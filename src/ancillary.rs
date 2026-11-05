@@ -150,7 +150,7 @@ impl RawMessage<'_> {
         // SAFETY: ucred consists of integer fields, and the whole value fits.
         // read_unaligned imposes no alignment requirement on the byte slice.
         let cred = unsafe { self.data.as_ptr().cast::<libc::ucred>().read_unaligned() };
-        Some(crate::ScmCredentials::from_ucred(cred))
+        Some(crate::ScmCredentials::new(cred.pid, cred.uid, cred.gid))
     }
 }
 
@@ -266,6 +266,12 @@ pub(crate) unsafe fn for_each_fd(buffer: &[u8], mut sink: impl FnMut(OwnedFd)) {
     }
 }
 
+/// The first credentials in a received control buffer. Takes no ownership.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn credentials(buffer: &[u8]) -> Option<crate::ScmCredentials> {
+    (RawMessages { remaining: buffer }).find_map(|message| message.credentials())
+}
+
 /// Caller-provided storage for sending or receiving ancillary messages.
 ///
 /// Send descriptors remain borrowed until this buffer is dropped. Received
@@ -317,7 +323,11 @@ impl<'a> SocketAncillary<'a> {
     /// [`crate::ScmCredentials::for_this_process`] supplies permitted values.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn add_credentials(&mut self, creds: crate::ScmCredentials) -> Result<(), AncillaryError> {
-        let cred = creds.to_ucred();
+        let cred = libc::ucred {
+            pid: creds.pid(),
+            uid: creds.uid(),
+            gid: creds.gid(),
+        };
         // ucred is three consecutive integer fields without padding on Linux/Android.
         let bytes = unsafe {
             std::slice::from_raw_parts(
@@ -345,9 +355,8 @@ impl<'a> SocketAncillary<'a> {
         if end > self.buffer.len() {
             return Err(AncillaryError);
         }
-        let length = header_len()
-            .checked_add(payload_len)
-            .ok_or(AncillaryError)?;
+        // cmsg_space above bounded payload_len to i32::MAX, so this cannot overflow.
+        let length = header_len() + payload_len;
         #[allow(clippy::useless_conversion)]
         let cmsg_len = length.try_into().map_err(|_| AncillaryError)?;
         let start = self.length;

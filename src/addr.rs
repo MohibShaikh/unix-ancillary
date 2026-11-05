@@ -1,11 +1,10 @@
 //! Descriptor passing to and from an address, for sockets that are not connected.
 
 use std::ffi::OsStr;
-use std::io;
-use std::mem;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsFd;
 use std::os::unix::net::SocketAddr;
+use std::{io, mem};
 
 #[cfg(target_os = "android")]
 use std::os::android::net::SocketAddrExt;

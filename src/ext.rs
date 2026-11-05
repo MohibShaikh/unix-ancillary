@@ -14,8 +14,8 @@ pub(crate) use SocketKind::{Datagram, Stream};
 pub(crate) const DEFAULT_STREAM_BUF: usize = 4096;
 pub(crate) const DEFAULT_DATAGRAM_BUF: usize = 65536;
 
-/// Whether the receive operation is a stream or a datagram. Datagrams reject
-/// payload truncation; streams cannot truncate and ignore the flag.
+/// Whether a receive is on a stream or a datagram. A zero-length read on a stream
+/// is end of stream; on a datagram it can be an empty message.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketKind {
     Stream,
@@ -51,6 +51,9 @@ pub struct ReceivedFds {
     pub fds: Vec<OwnedFd>,
     /// Descriptors the peer sent beyond `N`, already closed.
     pub surplus_closed: usize,
+    /// The sender's credentials, when the socket has [`crate::set_passcred`] on.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub credentials: Option<crate::ScmCredentials>,
 }
 
 /// Reject descriptors with no payload byte to carry them on a stream.
@@ -99,7 +102,7 @@ pub(crate) fn send_fds_flags_impl<F: AsFd>(
 /// Receive into `data_buf`, capping fds returned to the caller at `N`.
 ///
 /// The ancillary budget covers Linux's 253-fd limit plus automatic credentials.
-/// BSD uses the same fd budget; macOS reserves XNU's 254-fd message limit.
+/// macOS reserves XNU's 254-fd message limit, and other targets what was asked.
 /// Any reported truncation is an error, closing all delivered descriptors.
 pub(crate) fn recv_fds_into_impl(
     fd: BorrowedFd<'_>,
@@ -117,8 +120,8 @@ pub(crate) fn recv_fds_into_vectored_impl(
     kind: SocketKind,
     mode: CountMode,
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    let (bytes_read, fds, _) = recv_core(fd, iov, kind, mode)?;
-    Ok((bytes_read, fds))
+    let (result, fds, _) = recv_core(fd, iov, kind, mode)?;
+    Ok((result.bytes_read, fds))
 }
 
 thread_local! {
@@ -142,27 +145,37 @@ pub(crate) fn recv_owned_impl(
     }
     let mut iov = [io::IoSliceMut::new(&mut scratch[..size])];
     let received = recv_core(fd, &mut iov, kind, mode);
-    let result = received.map(|(bytes_read, fds, surplus_closed)| ReceivedFds {
-        data: scratch[..bytes_read].to_vec(),
+    // Do not keep the payload past this call. `WouldBlock` wrote nothing, and an
+    // async receive retries on it, so skip the 64 KiB there.
+    let result = received.map(|(result, fds, surplus_closed)| ReceivedFds {
+        data: scratch[..result.bytes_read].to_vec(),
         fds,
         surplus_closed,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        credentials: result.credentials,
     });
+    let written = match &result {
+        Ok(received) => received.data.len(),
+        Err(err) if err.kind() == WouldBlock => 0,
+        Err(_) => size,
+    };
+    scratch[..written].fill(0);
     let _ = SCRATCH.try_with(|cell| cell.set(scratch));
     result
 }
 
-/// Returns `(bytes_read, fds, surplus_closed)`.
+/// Returns `(result, fds, surplus_closed)`.
 fn recv_core(
     fd: BorrowedFd<'_>,
     iov: &mut [io::IoSliceMut<'_>],
     kind: SocketKind,
     mode: CountMode,
-) -> io::Result<(usize, Vec<OwnedFd>, usize)> {
+) -> io::Result<(cmsg::RecvMsgResult, Vec<OwnedFd>, usize)> {
     let has_room = iov.iter().any(|buf| !buf.is_empty());
     let (UpTo(wanted) | Exact(wanted)) = mode;
     let size = recv_control_size(wanted);
     let (result, mut fds) = with_control(size, |buf| cmsg::recv_fds(fd, iov, buf))?;
-    check_truncation(&result, kind)?;
+    check_truncation(&result)?;
 
     if let (Exact(n), Stream, 0, true, true) =
         (mode, kind, result.bytes_read, fds.is_empty(), has_room)
@@ -180,7 +193,7 @@ fn recv_core(
             // Keep first n; truncate closes the surplus `OwnedFd`s.
             let surplus = fds.len().saturating_sub(n);
             fds.truncate(n);
-            Ok((result.bytes_read, fds, surplus))
+            Ok((result, fds, surplus))
         }
         Exact(n) => {
             if fds.len() != n {
@@ -194,7 +207,7 @@ fn recv_core(
                     ),
                 ));
             }
-            Ok((result.bytes_read, fds, 0))
+            Ok((result, fds, 0))
         }
     }
 }
@@ -209,7 +222,7 @@ fn recv_control_size(fds: usize) -> usize {
 }
 
 /// Reject a truncated receive. Returning the error drops anything delivered.
-fn check_truncation(result: &cmsg::RecvMsgResult, kind: SocketKind) -> io::Result<()> {
+fn check_truncation(result: &cmsg::RecvMsgResult) -> io::Result<()> {
     if result.ancillary_truncated {
         return Err(io::Error::new(
             InvalidData,
@@ -217,7 +230,7 @@ fn check_truncation(result: &cmsg::RecvMsgResult, kind: SocketKind) -> io::Resul
              discard the incomplete message",
         ));
     }
-    if kind == Datagram && result.data_truncated {
+    if result.data_truncated {
         // `cmsg_recvmsg` is the only path that reports the flag instead of failing.
         let msg = "datagram payload truncated before it fit the receive buffer";
         return Err(io::Error::new(InvalidData, msg));
@@ -235,9 +248,15 @@ pub struct RecvSlots {
     pub fds: usize,
     /// Descriptors that did not fit, already closed.
     pub surplus_closed: usize,
+    /// The sender's credentials, when the socket has [`crate::set_passcred`] on.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub credentials: Option<crate::ScmCredentials>,
 }
 
 /// Receive into caller storage without allocating.
+///
+/// `vec![None; n]` does not compile, because `OwnedFd` is not `Clone`. For a count
+/// known at run time, use `(0..n).map(|_| None).collect::<Vec<_>>()` once and reuse it.
 ///
 /// Works on any connected Unix socket that is `AsFd`, with the same CLOEXEC
 /// handling and truncation errors as the other receives. Existing contents of
@@ -292,7 +311,7 @@ pub(crate) fn recv_slots(
     let (result, fds, surplus_closed) = with_control(size, |buf| {
         cmsg::recv_fds_slots(fd, iov, buf, slots, flags, addr)
     })?;
-    if let Err(err) = check_truncation(&result, Datagram) {
+    if let Err(err) = check_truncation(&result) {
         slots.fill_with(|| None);
         return Err(err);
     }
@@ -300,7 +319,15 @@ pub(crate) fn recv_slots(
         bytes_read: result.bytes_read,
         fds,
         surplus_closed,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        credentials: result.credentials,
     })
+}
+
+/// A send that carried descriptors but no bytes, which a stream should never do.
+/// Going on would finish the payload and report success with the descriptors lost.
+pub(crate) fn require_progress(sent: usize) -> io::Result<usize> {
+    (sent > 0).then_some(sent).ok_or(WriteZero.into())
 }
 
 /// The error payload when [`UnixStreamExt::send_fds_all`] stops with `WouldBlock`
@@ -413,9 +440,8 @@ pub trait UnixStreamExt {
 
     /// Receive data and up to `N` file descriptors.
     ///
-    /// Reads into a 4 KiB per-thread buffer and copies out what arrived, so the
-    /// last payload stays in that buffer until the next receive on the thread.
-    /// Surplus fds beyond `N` are closed
+    /// Reads into a 4 KiB per-thread buffer, then copies out what arrived and clears
+    /// it. Surplus fds beyond `N` are closed
     /// automatically and counted in [`ReceivedFds::surplus_closed`]. Control
     /// storage reserves room for many descriptors, but a peer can still
     /// overflow it; that is reported as `InvalidData`.
@@ -462,7 +488,7 @@ impl UnixStreamExt for UnixStream {
         let mut sent = if fds.is_empty() {
             0
         } else {
-            send_fds_impl(self.as_fd(), data, fds)?
+            send_fds_impl(self.as_fd(), data, fds).and_then(require_progress)?
         };
         while sent < data.len() {
             let n = cmsg::send_bytes(self.as_fd(), &data[sent..]).map_err(|err| {
@@ -504,9 +530,8 @@ pub trait UnixDatagramExt {
 
     /// Receive data and up to `N` fds.
     ///
-    /// Reads into a 64 KiB per-thread buffer and copies out what arrived, so the
-    /// last payload stays in that buffer until the next receive on the thread.
-    /// Surplus fds beyond `N` are closed
+    /// Reads into a 64 KiB per-thread buffer, then copies out what arrived and clears
+    /// it. Surplus fds beyond `N` are closed
     /// automatically and counted in [`ReceivedFds::surplus_closed`]. Control
     /// storage reserves room for many descriptors, but a peer can still
     /// overflow it; that is reported as `InvalidData`.

@@ -1,6 +1,5 @@
-use std::io;
-use std::mem;
 use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
+use std::{io, mem};
 
 use crate::addr::RawAddr;
 use crate::platform;
@@ -10,6 +9,8 @@ pub(crate) struct RecvMsgResult {
     pub ancillary_len: usize,
     pub ancillary_truncated: bool,
     pub data_truncated: bool,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub credentials: Option<crate::ScmCredentials>,
 }
 
 /// Send ordinary bytes without ancillary data, using the same signal-safe
@@ -70,7 +71,7 @@ pub(crate) fn recvmsg_raw(
     extra_flags: libc::c_int,
     mut addr: Option<&mut RawAddr>,
 ) -> io::Result<RecvMsgResult> {
-    // SAFETY: same justification as sendmsg_vectored.
+    // SAFETY: same justification as sendmsg_flags.
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
     msg.msg_iov = iov.as_mut_ptr() as *mut libc::iovec;
     msg.msg_iovlen = iov.len() as _;
@@ -106,6 +107,8 @@ pub(crate) fn recvmsg_raw(
         ancillary_len: msg.msg_controllen as usize,
         ancillary_truncated: (msg.msg_flags & libc::MSG_CTRUNC) != 0,
         data_truncated: (msg.msg_flags & libc::MSG_TRUNC) != 0,
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        credentials: crate::ancillary::credentials(&ancillary_buf[..msg.msg_controllen as usize]),
     })
 }
 

@@ -117,16 +117,6 @@ pub mod tokio {
         .await
     }
 
-    /// Async [`recv_fds`](super::recv_fds).
-    pub async fn recv_fds<const N: usize, T: AsFd + std::os::fd::AsRawFd>(
-        sock: &AsyncFd<T>,
-    ) -> io::Result<ReceivedFds> {
-        sock.async_io(Interest::READABLE, |s| {
-            recv_owned_impl(s.as_fd(), DEFAULT_DATAGRAM_BUF, Datagram, UpTo(N))
-        })
-        .await
-    }
-
     /// Async [`recv_fds_into`](super::recv_fds_into).
     pub async fn recv_fds_into<const N: usize, T: AsFd + std::os::fd::AsRawFd>(
         sock: &AsyncFd<T>,

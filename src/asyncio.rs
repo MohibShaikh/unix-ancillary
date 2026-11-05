@@ -19,9 +19,9 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_flags_impl,
-    send_fds_impl, validate_stream_iov, Datagram, Exact, ReceivedFds, Stream, UpTo,
-    DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
+    recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, require_progress,
+    send_fds_flags_impl, send_fds_impl, validate_stream_iov, Datagram, Exact, ReceivedFds, Stream,
+    UpTo, DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
 
 /// The owned and into-buffer receives, the same on each socket type apart from
@@ -174,7 +174,8 @@ impl AsyncUnixStreamExt for UnixStream {
             self.async_io(Interest::WRITABLE, || {
                 send_fds_impl(self.as_fd(), data, fds)
             })
-            .await?
+            .await
+            .and_then(require_progress)?
         };
         while sent < data.len() {
             let n = self

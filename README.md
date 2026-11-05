@@ -78,8 +78,9 @@ processes retain their normal OS permissions; this example does not sandbox them
   the connection through your protocol. Concurrent writers must serialize whole
   protocol operations if interleaving would be invalid.
 - `recv_fds` / `recv_fds_into`: receive up to `N` descriptors and close surplus.
-  The allocating variant uses 4 KiB for streams and 64 KiB for datagrams, and
-  reports how many it closed in `surplus_closed`.
+  `recv_fds` reads up to 4 KiB on streams and 64 KiB on datagrams, and reports how
+  many it closed in `surplus_closed`. `recv_fds_into` does not report that count; use
+  `recv_fds_slots` if you need it with your own buffer.
 - `recv_fds_exact` / `recv_fds_exact_into`: reject fewer or more than `N` descriptors
   in this receive, closing the entire batch and discarding its bytes on mismatch.
   This does not wait for later stream bytes or descriptors to complete a message.
@@ -198,12 +199,13 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
 
 ## Cost
 
-A send allocates nothing. A receive allocates its returned `Vec` when descriptors
+A send of up to about 1,000 descriptors allocates nothing, and more than that
+uses the heap for its control message, though no kernel this crate tests accepts that
+many. A receive allocates its returned `Vec` when descriptors
 arrive and nothing when none do. `recv_fds` also allocates a `Vec` the size of the
-message, and keeps one receive buffer per thread: 4 KiB for streams, 64 KiB for
-datagrams and seqpacket. `recv_fds_slots` never allocates: it fills a slice you
-own, and it works on tokio sockets inside `async_io`. Control storage stays on the
-stack. macOS also pays one `setsockopt` per send and one `fcntl` per received
+message, and keeps one cleared receive buffer per thread: 4 KiB for streams, 64 KiB
+for datagrams and seqpacket. `recv_fds_slots` never allocates: it fills a slice you
+own, and it works on tokio sockets inside `async_io`. Receive control storage stays on the stack. macOS also pays one `setsockopt` per send and one `fcntl` per received
 descriptor.
 `tests/allocations.rs` checks these counts on Linux.
 

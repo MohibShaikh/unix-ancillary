@@ -133,3 +133,29 @@ fn maximum_rights_with_automatic_credentials_datagram() {
     tx.send_fds(b"x", &[&file; 253]).unwrap();
     assert_eq!(rx.recv_fds_exact::<253>().unwrap().fds.len(), 253);
 }
+
+#[test]
+fn slots_and_owned_receives_carry_credentials() {
+    use unix_ancillary::recv_fds_slots;
+    let (tx, rx) = UnixStream::pair().unwrap();
+    set_passcred(&rx, true).unwrap();
+    let file = tempfile::tempfile().unwrap();
+    let me = ScmCredentials::for_this_process();
+
+    tx.send_fds(b"x", &[&file]).unwrap();
+    let (mut data, mut slots) = ([0u8; 1], [None]);
+    let got = recv_fds_slots(&rx, &mut data, &mut slots).unwrap();
+    assert_eq!((got.fds, got.credentials), (1, Some(me)));
+
+    tx.send_fds(b"x", &[&file]).unwrap();
+    let got = rx.recv_fds::<1>().unwrap();
+    assert_eq!((got.fds.len(), got.credentials), (1, Some(me)));
+}
+
+#[test]
+fn credentials_are_none_without_passcred() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"x", &[&file]).unwrap();
+    assert_eq!(rx.recv_fds::<1>().unwrap().credentials, None);
+}

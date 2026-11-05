@@ -58,10 +58,11 @@ mod flags {
     pub(crate) const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
 }
 
-/// macOS and others lack both. Close-on-exec comes from `fcntl` after the receive,
-/// accepting the brief inherit-across-exec race. Apple suppresses `SIGPIPE` through
-/// [`prepare_send`]. Other targets (illumos, Solaris, AIX) have no portable way, so
-/// their applications must ignore or handle `SIGPIPE`.
+/// Close-on-exec comes from `fcntl` after the receive, accepting the brief
+/// inherit-across-exec race. Apple suppresses `SIGPIPE` through [`prepare_send`],
+/// and illumos and Solaris through `MSG_NOSIGNAL`, which no kernel of theirs has
+/// been run with here. Applications on any other target, such as AIX, must ignore
+/// or handle `SIGPIPE`.
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
@@ -72,6 +73,9 @@ mod flags {
 )))]
 mod flags {
     pub(crate) const RECV_FLAGS: libc::c_int = 0;
+    #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+    pub(crate) const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+    #[cfg(not(any(target_os = "illumos", target_os = "solaris")))]
     pub(crate) const SEND_FLAGS: libc::c_int = 0;
 }
 

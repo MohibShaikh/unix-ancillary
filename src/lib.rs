@@ -77,10 +77,10 @@
 //! - Datagram methods reject payload truncation with `InvalidData`; use
 //!   [`cmsg_recvmsg`] to inspect a truncated datagram via
 //!   [`RecvResult::data_truncated`].
-//! - Sends retry internally on `EINTR` and are `SIGPIPE`-safe on Linux, Android,
-//!   the BSDs and Apple platforms, through `MSG_NOSIGNAL` or `SO_NOSIGPIPE`. Other
-//!   Unix targets, such as illumos and Solaris, have neither: ignore or handle
-//!   `SIGPIPE` there.
+//! - Sends retry internally on `EINTR` and are `SIGPIPE`-safe through `MSG_NOSIGNAL`
+//!   or `SO_NOSIGPIPE` on Linux, Android, the BSDs, Apple platforms, illumos and
+//!   Solaris. Tests run only on Linux and macOS. On any other Unix target, ignore
+//!   or handle `SIGPIPE`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../MIGRATION.md")]

@@ -166,3 +166,20 @@ async fn async_forms_round_trip_after_waiting() {
         .unwrap();
     assert_eq!((n, fds.len()), (2, 1));
 }
+
+#[cfg(not(target_vendor = "apple"))]
+#[test]
+fn stream_methods_on_a_wrapped_seqpacket_socket_report_a_long_message() {
+    use std::os::unix::net::UnixStream;
+    use unix_ancillary::UnixStreamExt;
+
+    let (a, b) = unix_ancillary::seqpacket::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    unix_ancillary::seqpacket::send_fds(&a, b"0123456789", &[&file]).unwrap();
+
+    let mut data = [0u8; 4];
+    let err = UnixStream::from(b)
+        .recv_fds_into::<1>(&mut data)
+        .unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
