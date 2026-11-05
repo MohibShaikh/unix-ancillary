@@ -133,13 +133,59 @@ pub fn cmsg_sendmsg(
     iov: &[io::IoSlice<'_>],
     ancillary: &SocketAncillary<'_>,
 ) -> io::Result<usize> {
+    send_from_ancillary(fd, iov, ancillary, 0)
+}
+
+/// [`cmsg_sendmsg`] with extra `sendmsg` flags: `MSG_DONTWAIT` and `MSG_EOR`.
+///
+/// The crate's signal-safety flags always stay on. Any other flag is
+/// `InvalidInput`.
+pub fn cmsg_sendmsg_with_flags(
+    fd: BorrowedFd<'_>,
+    iov: &[io::IoSlice<'_>],
+    ancillary: &SocketAncillary<'_>,
+    flags: libc::c_int,
+) -> io::Result<usize> {
+    allow_flags(flags, libc::MSG_DONTWAIT | libc::MSG_EOR)?;
+    send_from_ancillary(fd, iov, ancillary, flags)
+}
+
+fn send_from_ancillary(
+    fd: BorrowedFd<'_>,
+    iov: &[io::IoSlice<'_>],
+    ancillary: &SocketAncillary<'_>,
+    flags: libc::c_int,
+) -> io::Result<usize> {
     if ancillary.receive_mode {
+        let msg = "clear the receive buffer before building a send";
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
+    }
+    cmsg::sendmsg_flags(fd, iov, ancillary.buffer, ancillary.length, flags)
+}
+
+/// [`cmsg_recvmsg`] with extra `recvmsg` flags: `MSG_DONTWAIT` and `MSG_WAITALL`.
+///
+/// Close-on-exec handling always stays on. Any other flag is `InvalidInput`,
+/// including `MSG_PEEK`, which is only safe on some kernels (see
+/// `cmsg_recvmsg_peek`).
+pub fn cmsg_recvmsg_with_flags(
+    fd: BorrowedFd<'_>,
+    iov: &mut [io::IoSliceMut<'_>],
+    ancillary: &mut SocketAncillary<'_>,
+    flags: libc::c_int,
+) -> io::Result<RecvResult> {
+    allow_flags(flags, libc::MSG_DONTWAIT | libc::MSG_WAITALL)?;
+    recv_into_ancillary(fd, iov, ancillary, flags)
+}
+
+fn allow_flags(flags: libc::c_int, allowed: libc::c_int) -> io::Result<()> {
+    if flags & !allowed != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "clear the receive buffer before building a send",
+            "unsupported socket flag",
         ));
     }
-    cmsg::sendmsg_vectored(fd, iov, ancillary.buffer, ancillary.length)
+    Ok(())
 }
 
 /// Receive data with ancillary control messages from a Unix socket.

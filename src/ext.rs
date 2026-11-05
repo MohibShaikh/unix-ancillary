@@ -1,4 +1,5 @@
 use std::io;
+use std::io::ErrorKind::{InvalidData, InvalidInput, WriteZero};
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::net::{UnixDatagram, UnixStream};
 
@@ -59,11 +60,14 @@ pub struct ReceivedFds {
 }
 
 pub(crate) fn validate_stream_send(data: &[u8], fd_count: usize) -> io::Result<()> {
-    if data.is_empty() && fd_count != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "SCM_RIGHTS over a Unix stream requires at least one payload byte",
-        ));
+    validate_stream_iov(&[io::IoSlice::new(data)], fd_count)
+}
+
+/// Reject descriptors with no payload byte to carry them on a stream.
+pub(crate) fn validate_stream_iov(iov: &[io::IoSlice<'_>], fd_count: usize) -> io::Result<()> {
+    if fd_count != 0 && iov.iter().all(|buf| buf.is_empty()) {
+        let msg = "SCM_RIGHTS over a Unix stream requires at least one payload byte";
+        return Err(io::Error::new(InvalidInput, msg));
     }
     Ok(())
 }
@@ -81,22 +85,26 @@ pub(crate) fn send_fds_vectored_impl<F: AsFd>(
     iov: &[io::IoSlice<'_>],
     fds: &[F],
 ) -> io::Result<usize> {
+    send_fds_flags_impl(fd, iov, fds, 0)
+}
+
+pub(crate) fn send_fds_flags_impl<F: AsFd>(
+    fd: BorrowedFd<'_>,
+    iov: &[io::IoSlice<'_>],
+    fds: &[F],
+    flags: libc::c_int,
+) -> io::Result<usize> {
     // No descriptors: send no control message, not an empty SCM_RIGHTS header.
     if fds.is_empty() {
-        return cmsg::sendmsg_vectored(fd, iov, &[], 0);
+        return cmsg::sendmsg_flags(fd, iov, &[], 0, flags);
     }
     with_control(SocketAncillary::buffer_size_for_rights(fds.len()), |buf| {
         let mut ancillary = SocketAncillary::new(buf);
         ancillary
             .add_rights(fds.iter().map(|f| f.as_fd().as_raw_fd()))
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        cmsg::sendmsg_vectored(fd, iov, ancillary.buffer, ancillary.length)
+            .map_err(|e| io::Error::new(InvalidInput, e))?;
+        cmsg::sendmsg_flags(fd, iov, ancillary.buffer, ancillary.length, flags)
     })
-}
-
-/// Total payload bytes across the iovecs, for the stream empty-payload rule.
-pub(crate) fn iov_len(iov: &[io::IoSlice<'_>]) -> usize {
-    iov.iter().map(|s| s.len()).sum()
 }
 
 /// Receive into `data_buf`, capping fds returned to the caller at `N`.
@@ -178,7 +186,7 @@ fn recv_core(
                 // Returning drops `fds`, closing every received descriptor; the
                 // caller must not observe a partial set.
                 return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                    InvalidData,
                     format!(
                         "expected exactly {n} file descriptors, received {}",
                         fds.len()
@@ -197,12 +205,7 @@ fn recv_control_size(fds: usize) -> io::Result<usize> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let size = size
         .checked_add(SocketAncillary::buffer_size_for_credentials())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "ancillary buffer size overflow",
-            )
-        })?;
+        .ok_or_else(|| io::Error::new(InvalidInput, "ancillary buffer size overflow"))?;
     Ok(size)
 }
 
@@ -210,17 +213,15 @@ fn recv_control_size(fds: usize) -> io::Result<usize> {
 fn check_truncation(result: &cmsg::RecvMsgResult, kind: SocketKind) -> io::Result<()> {
     if result.ancillary_truncated {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+            InvalidData,
             "ancillary data truncated by too many descriptors or a full fd table; \
              discard the incomplete message",
         ));
     }
     if kind == Datagram && result.data_truncated {
         // `cmsg_recvmsg` is the only path that reports the flag instead of failing.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "datagram payload truncated before it fit the receive buffer",
-        ));
+        let msg = "datagram payload truncated before it fit the receive buffer";
+        return Err(io::Error::new(InvalidData, msg));
     }
     Ok(())
 }
@@ -364,12 +365,7 @@ impl UnixStreamExt for UnixStream {
     }
 
     fn send_fds_vectored(&self, iov: &[io::IoSlice<'_>], fds: &[impl AsFd]) -> io::Result<usize> {
-        if !fds.is_empty() && iov_len(iov) == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "SCM_RIGHTS over a Unix stream requires at least one payload byte",
-            ));
-        }
+        validate_stream_iov(iov, fds.len())?;
         send_fds_vectored_impl(self.as_fd(), iov, fds)
     }
 
@@ -387,17 +383,14 @@ impl UnixStreamExt for UnixStream {
         } else {
             let first = send_fds_impl(self.as_fd(), data, fds)?;
             if first == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to send fd payload byte",
-                ));
+                return Err(io::Error::new(WriteZero, "failed to send fd payload byte"));
             }
             first
         };
         while sent < data.len() {
             let n = cmsg::send_bytes(self.as_fd(), &data[sent..])?;
             if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "short write"));
+                return Err(io::Error::new(WriteZero, "short write"));
             }
             sent += n;
         }

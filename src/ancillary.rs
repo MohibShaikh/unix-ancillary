@@ -456,7 +456,10 @@ mod tests {
     /// what fit. Descriptors in the copied part must still become owned.
     #[test]
     fn oversized_cmsg_len_owns_the_descriptors_that_fit() {
-        let raw = tempfile::tempfile().unwrap().into_raw_fd();
+        // A parallel test can reuse a closed fd number, so prove the close through
+        // the peer seeing end of stream rather than by probing the number.
+        let (owned_end, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let raw = owned_end.into_raw_fd();
         // SAFETY: raw stays open until the OwnedFd below closes it.
         let fd = unsafe { BorrowedFd::borrow_raw(raw) };
         let mut storage = vec![0u8; SocketAncillary::buffer_size_for_rights(3)];
@@ -473,8 +476,8 @@ mod tests {
         assert_eq!(fds.len(), 1);
         assert_eq!(fds[0].as_raw_fd(), raw);
         messages.clear();
-        // SAFETY: F_GETFD on any int is defined.
-        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+        let mut byte = [0u8; 1];
+        assert_eq!(std::io::Read::read(&mut peer, &mut byte).unwrap(), 0);
     }
 
     #[test]

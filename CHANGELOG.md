@@ -33,7 +33,10 @@
 - `ReceivedFds::surplus_closed`.
 - `recv_fds_slots`: receive into caller-owned slots with no allocation, on any
   connected socket that is `AsFd`, and it reports the surplus it closed.
-- `seqpacket::pair`.
+- `seqpacket::pair`, `send_fds_vectored`, `recv_fds_vectored` and `recv_fds_exact`.
+  Seqpacket sends now set `MSG_EOR`.
+- `cmsg_sendmsg_with_flags` and `cmsg_recvmsg_with_flags`, limited to flags that
+  cannot break descriptor ownership.
 - `ScmRights` implements `ExactSizeIterator`.
 
 ### Behavior changes

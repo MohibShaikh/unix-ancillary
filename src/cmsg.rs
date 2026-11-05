@@ -18,12 +18,23 @@ pub(crate) fn send_bytes(fd: BorrowedFd<'_>, data: &[u8]) -> io::Result<usize> {
     sendmsg_vectored(fd, &iov, &[], 0)
 }
 
-/// Send data and ancillary control messages over a Unix socket.
+/// [`sendmsg_flags`] with only the platform's signal-safe flags.
 pub(crate) fn sendmsg_vectored(
     fd: BorrowedFd<'_>,
     iov: &[io::IoSlice<'_>],
     ancillary_buf: &[u8],
     ancillary_len: usize,
+) -> io::Result<usize> {
+    sendmsg_flags(fd, iov, ancillary_buf, ancillary_len, 0)
+}
+
+/// Send data and ancillary control messages over a Unix socket.
+pub(crate) fn sendmsg_flags(
+    fd: BorrowedFd<'_>,
+    iov: &[io::IoSlice<'_>],
+    ancillary_buf: &[u8],
+    ancillary_len: usize,
+    extra_flags: libc::c_int,
 ) -> io::Result<usize> {
     // `mem::zeroed::<msghdr>()` is sound on every libc target: every field is
     // either explicitly initialised below or unused for `sendmsg` (msg_name*,
@@ -43,7 +54,8 @@ pub(crate) fn sendmsg_vectored(
     loop {
         // SAFETY: same justification as above; SEND_FLAGS is defined by
         // platform.rs for every target.
-        let ret = unsafe { libc::sendmsg(fd.as_raw_fd(), &msg, platform::SEND_FLAGS) };
+        let ret =
+            unsafe { libc::sendmsg(fd.as_raw_fd(), &msg, platform::SEND_FLAGS | extra_flags) };
         if ret >= 0 {
             return Ok(ret as usize);
         }

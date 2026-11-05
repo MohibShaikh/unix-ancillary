@@ -86,8 +86,9 @@ processes retain their normal OS permissions; this example does not sandbox them
   With `N > 0`, a closed peer is `UnexpectedEof`.
 - Convenience datagram receives reject payload truncation with `InvalidData`.
   All convenience receives reject ancillary truncation with `InvalidData`.
-- Vectored methods are available on both blocking traits and the async stream
-  trait. The async datagram trait currently exposes scalar operations.
+- Vectored methods are available on both blocking traits, the async stream trait
+  and `seqpacket`. For a vectored receive on a tokio datagram socket, call
+  `seqpacket::recv_fds_vectored` inside `async_io`.
 
 Unix streams do not preserve send-call boundaries. A receive may deliver a
 prefix of a send or data from multiple sends. Use a protocol with explicit
@@ -124,6 +125,10 @@ Linux. macOS has no `AF_UNIX` `SOCK_SEQPACKET`.
 
 `cmsg_sendmsg` does not apply the stream payload rule. On a stream, an empty
 payload returns `Ok(0)` and the kernel delivers no descriptors.
+
+`cmsg_sendmsg_with_flags` takes `MSG_DONTWAIT` and `MSG_EOR`, and
+`cmsg_recvmsg_with_flags` takes `MSG_DONTWAIT` and `MSG_WAITALL`. Anything else is
+`InvalidInput`, and the crate's own safety flags stay on.
 
 `cmsg_recvmsg_peek` (Linux/Android) reads a message without consuming it. Those
 kernels install fresh duplicates on each peek, and each copy is yours to close.

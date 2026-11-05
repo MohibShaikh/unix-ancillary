@@ -93,6 +93,50 @@ fn public_pair_is_connected_seqpacket_with_cloexec() {
     assert_eq!((&buf[..n], fds.len()), (&b"one"[..], 1));
 }
 
+#[test]
+fn vectored_and_exact_forms_keep_one_message_per_send() {
+    use std::io::{IoSlice, IoSliceMut};
+    let (a, b) = seqpacket::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    seqpacket::send_fds_vectored(&a, &[IoSlice::new(b"he"), IoSlice::new(b"ad")], &[&file])
+        .unwrap();
+    seqpacket::send_fds(&a, b"next", &[&file]).unwrap();
+
+    let (mut head, mut tail) = ([0u8; 2], [0u8; 8]);
+    let (n, fds) = seqpacket::recv_fds_vectored::<1>(
+        &b,
+        &mut [IoSliceMut::new(&mut head), IoSliceMut::new(&mut tail)],
+    )
+    .unwrap();
+    assert_eq!((n, &head, &tail[..2], fds.len()), (4, b"he", &b"ad"[..], 1));
+
+    let exact = seqpacket::recv_fds_exact::<1>(&b).unwrap();
+    assert_eq!((&exact.data[..], exact.fds.len()), (&b"next"[..], 1));
+}
+
+#[cfg(feature = "tokio")]
+#[tokio::test]
+async fn vectored_receive_works_on_a_tokio_datagram_socket() {
+    use std::io::IoSliceMut;
+    use tokio::io::Interest;
+    use unix_ancillary::AsyncUnixDatagramExt;
+
+    let (tx, rx) = tokio::net::UnixDatagram::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    let (mut head, mut tail) = ([0u8; 1], [0u8; 4]);
+    let received = rx.async_io(Interest::READABLE, || {
+        seqpacket::recv_fds_vectored::<1>(
+            &rx,
+            &mut [IoSliceMut::new(&mut head), IoSliceMut::new(&mut tail)],
+        )
+    });
+    let fds = [&file];
+    let (received, sent) = tokio::join!(received, tx.send_fds(b"abc", &fds));
+    assert_eq!(sent.unwrap(), 3);
+    assert_eq!(received.unwrap().1.len(), 1);
+    assert_eq!((&head, &tail[..2]), (b"a", &b"bc"[..]));
+}
+
 #[cfg(feature = "tokio")]
 #[allow(deprecated)] // AsyncFd::new is what the MSRV's tokio has.
 #[tokio::test]

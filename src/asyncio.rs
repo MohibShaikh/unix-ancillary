@@ -19,9 +19,9 @@ use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    iov_len, recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_impl,
-    send_fds_vectored_impl, validate_stream_send, Datagram, Exact, ReceivedFds, Stream, UpTo,
-    DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
+    recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_impl,
+    send_fds_vectored_impl, validate_stream_iov, validate_stream_send, Datagram, Exact,
+    ReceivedFds, Stream, UpTo, DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
 
 /// Async fd passing on tokio's [`UnixStream`].
@@ -101,12 +101,7 @@ impl AsyncUnixStreamExt for UnixStream {
         iov: &[io::IoSlice<'_>],
         fds: &[impl AsFd],
     ) -> io::Result<usize> {
-        if !fds.is_empty() && iov_len(iov) == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "SCM_RIGHTS over a Unix stream requires at least one payload byte",
-            ));
-        }
+        validate_stream_iov(iov, fds.len())?;
         self.async_io(Interest::WRITABLE, || {
             send_fds_vectored_impl(self.as_fd(), iov, fds)
         })
@@ -142,10 +137,8 @@ impl AsyncUnixStreamExt for UnixStream {
                 })
                 .await?;
             if first == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to send fd payload byte",
-                ));
+                let msg = "failed to send fd payload byte";
+                return Err(io::Error::new(io::ErrorKind::WriteZero, msg));
             }
             first
         };
