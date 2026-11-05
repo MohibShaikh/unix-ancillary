@@ -1,6 +1,6 @@
 //! Heap allocations per handoff, counted per thread so the test harness cannot
-//! disturb the numbers. Linux only: macOS sizes its receive budget from
-//! `RLIMIT_NOFILE`, which CI runners may set too high for the stack buffer.
+//! disturb the numbers. Linux only: other platforms have not had their counts
+//! measured.
 #![cfg(target_os = "linux")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -99,6 +99,17 @@ fn slots_receive_does_not_allocate() {
     let mut slots = [None, None];
     let (count, got) = allocations(|| recv_fds_slots(&rx, &mut data, &mut slots).unwrap());
     assert_eq!((count, got.fds, got.surplus_closed), (0, 2, 1));
+}
+
+#[test]
+fn slots_receive_stays_off_the_heap_with_many_slots() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = std::fs::File::open("/dev/null").unwrap();
+    tx.send_fds(b"x", &[&file]).unwrap();
+    let mut data = [0u8; 8];
+    let mut slots: Vec<Option<std::os::fd::OwnedFd>> = (0..5000).map(|_| None).collect();
+    let (count, got) = allocations(|| recv_fds_slots(&rx, &mut data, &mut slots).unwrap());
+    assert_eq!((count, got.fds), (0, 1));
 }
 
 #[test]
