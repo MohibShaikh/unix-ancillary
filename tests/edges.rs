@@ -22,6 +22,9 @@ fn huge_descriptor_count_is_not_a_panic() {
 fn rejected_flags_still_close_unread_descriptors() {
     let (tx, rx) = UnixStream::pair().unwrap();
     let (held, mut peer) = UnixStream::pair().unwrap();
+    // Set this now: XNU refuses setsockopt once the other end has closed.
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
     tx.send_fds(b"x", &[&held]).unwrap();
     drop(held);
 
@@ -36,8 +39,6 @@ fn rejected_flags_still_close_unread_descriptors() {
     assert_eq!(err.kind(), ErrorKind::InvalidInput);
 
     // The only other copy was in `ancillary`, so the peer now sees end of stream.
-    peer.set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
     let mut byte = [0u8; 1];
     assert_eq!(peer.read(&mut byte).unwrap(), 0);
 }
