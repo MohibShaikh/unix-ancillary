@@ -11,8 +11,8 @@ categories = ["os::unix-apis", "network-programming"]
 exclude = ["/fuzz", "/target", "/.github", "/docs", "/AGENTS.md"]
 
 [dependencies]
-libc = "0.2"
-tokio = { version = "1", optional = true, default-features = false, features = ["net"] }
+libc = "0.2.80"
+tokio = { version = "1.28", optional = true, default-features = false, features = ["net"] }
 
 [features]
 # Async fd passing on tokio's UnixStream/UnixDatagram. Off by default —

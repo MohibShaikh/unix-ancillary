@@ -12,14 +12,14 @@
 #![allow(async_fn_in_trait)]
 
 use std::io;
-use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
+use std::os::unix::io::{AsFd, OwnedFd};
 
 use tokio::io::Interest;
 use tokio::net::{UnixDatagram, UnixStream};
 
 use crate::cmsg;
 use crate::ext::{
-    iov_len, recv_fds_into_impl, recv_fds_into_vectored_impl, send_fds_impl,
+    iov_len, recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_impl,
     send_fds_vectored_impl, validate_stream_send, CountMode, ReceivedFds, SocketKind,
     DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
 };
@@ -107,9 +107,8 @@ impl AsyncUnixStreamExt for UnixStream {
                 "SCM_RIGHTS over a Unix stream requires at least one payload byte",
             ));
         }
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         self.async_io(Interest::WRITABLE, || {
-            send_fds_vectored_impl(self.as_fd(), iov, &borrowed)
+            send_fds_vectored_impl(self.as_fd(), iov, fds)
         })
         .await
     }
@@ -131,22 +130,20 @@ impl AsyncUnixStreamExt for UnixStream {
 
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
         validate_stream_send(data, fds.len())?;
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         self.async_io(Interest::WRITABLE, || {
-            send_fds_impl(self.as_fd(), data, &borrowed)
+            send_fds_impl(self.as_fd(), data, fds)
         })
         .await
     }
 
     async fn send_fds_all(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<()> {
         validate_stream_send(data, fds.len())?;
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
-        let mut sent = if borrowed.is_empty() {
+        let mut sent = if fds.is_empty() {
             0
         } else {
             let first = self
                 .async_io(Interest::WRITABLE, || {
-                    send_fds_impl(self.as_fd(), data, &borrowed)
+                    send_fds_impl(self.as_fd(), data, fds)
                 })
                 .await?;
             if first == 0 {
@@ -173,21 +170,15 @@ impl AsyncUnixStreamExt for UnixStream {
 
     async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        let (n, fds) = self
-            .async_io(Interest::READABLE, || {
-                recv_fds_into_impl(
-                    self.as_fd(),
-                    &mut data_buf,
-                    SocketKind::Stream,
-                    CountMode::UpTo(N),
-                )
-            })
-            .await?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
+        self.async_io(Interest::READABLE, || {
+            recv_owned_impl(
+                self.as_fd(),
+                &mut data_buf,
+                SocketKind::Stream,
+                CountMode::UpTo(N),
+            )
         })
+        .await
     }
 
     async fn recv_fds_into<const N: usize>(
@@ -207,21 +198,15 @@ impl AsyncUnixStreamExt for UnixStream {
 
     async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
-        let (n, fds) = self
-            .async_io(Interest::READABLE, || {
-                recv_fds_into_impl(
-                    self.as_fd(),
-                    &mut data_buf,
-                    SocketKind::Stream,
-                    CountMode::Exact(N),
-                )
-            })
-            .await?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
+        self.async_io(Interest::READABLE, || {
+            recv_owned_impl(
+                self.as_fd(),
+                &mut data_buf,
+                SocketKind::Stream,
+                CountMode::Exact(N),
+            )
         })
+        .await
     }
 
     async fn recv_fds_exact_into<const N: usize>(
@@ -278,30 +263,23 @@ pub trait AsyncUnixDatagramExt {
 
 impl AsyncUnixDatagramExt for UnixDatagram {
     async fn send_fds(&self, data: &[u8], fds: &[impl AsFd]) -> io::Result<usize> {
-        let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(|f| f.as_fd()).collect();
         self.async_io(Interest::WRITABLE, || {
-            send_fds_impl(self.as_fd(), data, &borrowed)
+            send_fds_impl(self.as_fd(), data, fds)
         })
         .await
     }
 
     async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        let (n, fds) = self
-            .async_io(Interest::READABLE, || {
-                recv_fds_into_impl(
-                    self.as_fd(),
-                    &mut data_buf,
-                    SocketKind::Datagram,
-                    CountMode::UpTo(N),
-                )
-            })
-            .await?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
+        self.async_io(Interest::READABLE, || {
+            recv_owned_impl(
+                self.as_fd(),
+                &mut data_buf,
+                SocketKind::Datagram,
+                CountMode::UpTo(N),
+            )
         })
+        .await
     }
 
     async fn recv_fds_into<const N: usize>(
@@ -321,21 +299,15 @@ impl AsyncUnixDatagramExt for UnixDatagram {
 
     async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
-        let (n, fds) = self
-            .async_io(Interest::READABLE, || {
-                recv_fds_into_impl(
-                    self.as_fd(),
-                    &mut data_buf,
-                    SocketKind::Datagram,
-                    CountMode::Exact(N),
-                )
-            })
-            .await?;
-        data_buf.truncate(n);
-        Ok(ReceivedFds {
-            data: data_buf,
-            fds,
+        self.async_io(Interest::READABLE, || {
+            recv_owned_impl(
+                self.as_fd(),
+                &mut data_buf,
+                SocketKind::Datagram,
+                CountMode::Exact(N),
+            )
         })
+        .await
     }
 
     async fn recv_fds_exact_into<const N: usize>(

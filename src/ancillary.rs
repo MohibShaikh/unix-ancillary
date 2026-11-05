@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::{fmt, mem};
 
@@ -81,11 +82,35 @@ fn header_len() -> usize {
 }
 
 fn cmsg_space(payload_len: usize) -> Option<usize> {
-    // Derive the target's ABI alignment from libc, but do length arithmetic
-    // in checked usize operations instead of narrowing a caller length to u32.
-    let alignment = unsafe { (libc::CMSG_SPACE(1) - libc::CMSG_SPACE(0)) as usize };
-    let padded = payload_len.checked_add(alignment - 1)? / alignment * alignment;
-    header_len().checked_add(padded)
+    // Reject lengths whose aligned size could overflow CMSG_SPACE's u32.
+    let payload_len = u32::try_from(payload_len)
+        .ok()
+        .filter(|&n| n <= i32::MAX as u32)?;
+    // SAFETY: pure calculation, no pointers; the bound above rules out overflow.
+    Some(unsafe { libc::CMSG_SPACE(payload_len) } as usize)
+}
+
+/// Stack space for control messages. Covers Linux's whole receive budget, so
+/// the common paths never touch the heap.
+const STACK_CONTROL: usize = 4096;
+
+/// Run `f` with `size` zeroed bytes of cmsghdr-aligned control storage.
+pub(crate) fn with_control<R>(size: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
+    #[repr(align(8))]
+    struct Stack(MaybeUninit<[u8; STACK_CONTROL]>);
+
+    if size > STACK_CONTROL {
+        return f(&mut vec![0u8; size]);
+    }
+    let mut stack = Stack(MaybeUninit::uninit());
+    let start = stack.0.as_mut_ptr().cast::<u8>();
+    // SAFETY: size fits the array, and those bytes are zeroed before the slice
+    // is formed. Zeroing only `size` keeps a one-fd send from paying for 4 KiB.
+    let buffer = unsafe {
+        start.write_bytes(0, size);
+        std::slice::from_raw_parts_mut(start, size)
+    };
+    f(buffer)
 }
 
 struct RawMessage<'a> {
@@ -134,10 +159,13 @@ impl<'a> Iterator for RawMessages<'a> {
         let header = unsafe { bytes.as_ptr().cast::<libc::cmsghdr>().read_unaligned() };
         #[allow(clippy::unnecessary_cast)]
         let total = header.cmsg_len as usize;
-        if total < header_len() || total > bytes.len() {
+        // Apple keeps the full cmsg_len on a truncated message while copying
+        // only what fit. Those descriptors are installed, so parse what arrived.
+        let end = total.min(bytes.len());
+        if end < header_len() {
             return None;
         }
-        let data = &bytes[header_len()..total];
+        let data = &bytes[header_len()..end];
         if let Some(next) = cmsg_space(data.len()).filter(|&next| next <= bytes.len()) {
             self.remaining = &bytes[next..];
         }
@@ -153,24 +181,34 @@ impl<'a> Iterator for RawMessages<'a> {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const SCM_PIDFD: libc::c_int = 0x04;
 
+/// SO_PASSPIDFD (Linux 6.5+) makes the kernel install a pidfd with every
+/// message. It is not exposed, so close it here.
+///
+/// # Safety
+/// Same fresh-recv contract as [`take_received_into`].
+#[cfg(any(target_os = "linux", target_os = "android"))]
+unsafe fn close_pidfd(message: &RawMessage<'_>) {
+    if message.level == libc::SOL_SOCKET && message.kind == SCM_PIDFD {
+        for raw in message.rights() {
+            // SAFETY: guaranteed by this function's fresh-recv contract.
+            drop(unsafe { OwnedFd::from_raw_fd(raw) });
+        }
+    }
+}
+
 /// Own descriptors from one fresh successful recvmsg, before any fallible
 /// postprocessing. Never call with send buffers or previously consumed bytes.
 ///
 /// # Safety
 /// Every SCM_RIGHTS and SCM_PIDFD integer must be an open descriptor newly
 /// owned by the caller.
-pub(crate) unsafe fn take_received(buffer: &[u8]) -> Vec<ReceivedMessage> {
-    let mut messages = Vec::new();
+pub(crate) unsafe fn take_received_into(buffer: &[u8], messages: &mut Vec<ReceivedMessage>) {
     for message in (RawMessages { remaining: buffer }) {
-        // SO_PASSPIDFD (Linux 6.5+) makes the kernel install a pidfd with
-        // every message. It is not exposed, so close it here.
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        if message.level == libc::SOL_SOCKET && message.kind == SCM_PIDFD {
-            for raw in message.rights() {
-                // SAFETY: guaranteed by this function's fresh-recv contract.
-                drop(unsafe { OwnedFd::from_raw_fd(raw) });
-            }
-        }
+        // SAFETY: guaranteed by this function's fresh-recv contract.
+        unsafe {
+            close_pidfd(&message)
+        };
         if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
             let fds = message
                 .rights()
@@ -186,7 +224,45 @@ pub(crate) unsafe fn take_received(buffer: &[u8]) -> Vec<ReceivedMessage> {
             messages.push(ReceivedMessage::Credentials(creds));
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) unsafe fn take_received(buffer: &[u8]) -> Vec<ReceivedMessage> {
+    let mut messages = Vec::new();
+    // SAFETY: the caller upholds the fresh-recv contract.
+    unsafe { take_received_into(buffer, &mut messages) };
     messages
+}
+
+/// Own every delivered descriptor in one flat list, with no allocation when
+/// none arrived. Same purpose and contract as [`take_received_into`].
+///
+/// # Safety
+/// Every SCM_RIGHTS and SCM_PIDFD integer must be an open descriptor newly
+/// owned by the caller.
+pub(crate) unsafe fn take_fds(buffer: &[u8]) -> Vec<OwnedFd> {
+    let is_rights = |message: &RawMessage<'_>| {
+        message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS
+    };
+    let count = (RawMessages { remaining: buffer })
+        .filter(is_rights)
+        .map(|message| message.rights().count())
+        .sum();
+    let mut fds = Vec::with_capacity(count);
+    for message in (RawMessages { remaining: buffer }) {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        // SAFETY: guaranteed by this function's fresh-recv contract.
+        unsafe {
+            close_pidfd(&message)
+        };
+        if is_rights(&message) {
+            fds.extend(message.rights().map(|raw| {
+                // SAFETY: guaranteed by this function's fresh-recv contract.
+                unsafe { OwnedFd::from_raw_fd(raw) }
+            }));
+        }
+    }
+    fds
 }
 
 /// Caller-provided storage for sending or receiving ancillary messages.
@@ -204,7 +280,7 @@ pub struct SocketAncillary<'a> {
     pub(crate) truncated: bool,
     pub(crate) received: Vec<ReceivedMessage>,
     pub(crate) receive_mode: bool,
-    borrowed: Vec<BorrowedFd<'a>>,
+    borrowed: PhantomData<BorrowedFd<'a>>,
 }
 
 impl<'a> SocketAncillary<'a> {
@@ -216,7 +292,7 @@ impl<'a> SocketAncillary<'a> {
             truncated: false,
             received: Vec::new(),
             receive_mode: false,
-            borrowed: Vec::new(),
+            borrowed: PhantomData,
         }
     }
 
@@ -247,29 +323,34 @@ impl<'a> SocketAncillary<'a> {
                 crate::ScmCredentials::SIZE,
             )
         };
-        self.add_cmsg(libc::SOL_SOCKET, libc::SCM_CREDENTIALS, bytes)
+        self.reserve_cmsg(libc::SOL_SOCKET, libc::SCM_CREDENTIALS, bytes.len())?
+            .copy_from_slice(bytes);
+        Ok(())
     }
 
-    fn add_cmsg(
+    /// Write a control header and return its zeroed payload for the caller to fill.
+    fn reserve_cmsg(
         &mut self,
         level: libc::c_int,
         kind: libc::c_int,
-        payload: &[u8],
-    ) -> Result<(), AncillaryError> {
+        payload_len: usize,
+    ) -> Result<&mut [u8], AncillaryError> {
         if self.receive_mode {
             return Err(AncillaryError);
         }
-        let space = cmsg_space(payload.len()).ok_or(AncillaryError)?;
+        let space = cmsg_space(payload_len).ok_or(AncillaryError)?;
         let end = self.length.checked_add(space).ok_or(AncillaryError)?;
         if end > self.buffer.len() {
             return Err(AncillaryError);
         }
         let length = header_len()
-            .checked_add(payload.len())
+            .checked_add(payload_len)
             .ok_or(AncillaryError)?;
         #[allow(clippy::useless_conversion)]
         let cmsg_len = length.try_into().map_err(|_| AncillaryError)?;
-        let bytes = &mut self.buffer[self.length..end];
+        let start = self.length;
+        self.length = end;
+        let bytes = &mut self.buffer[start..end];
         bytes.fill(0);
         let header = bytes.as_mut_ptr().cast::<libc::cmsghdr>();
         // SAFETY: space reserves the whole header and payload. Form only raw
@@ -280,8 +361,29 @@ impl<'a> SocketAncillary<'a> {
             std::ptr::addr_of_mut!((*header).cmsg_type).write_unaligned(kind);
             std::ptr::addr_of_mut!((*header).cmsg_len).write_unaligned(cmsg_len);
         }
-        bytes[header_len()..length].copy_from_slice(payload);
-        self.length = end;
+        Ok(&mut bytes[header_len()..length])
+    }
+
+    /// Encode descriptor numbers directly into the buffer. An empty list writes
+    /// nothing, so it can never produce a bare SCM_RIGHTS header.
+    pub(crate) fn add_rights(
+        &mut self,
+        fds: impl ExactSizeIterator<Item = RawFd>,
+    ) -> Result<(), AncillaryError> {
+        if self.receive_mode {
+            return Err(AncillaryError);
+        }
+        if fds.len() == 0 {
+            return Ok(());
+        }
+        let len = fds
+            .len()
+            .checked_mul(mem::size_of::<RawFd>())
+            .ok_or(AncillaryError)?;
+        let payload = self.reserve_cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, len)?;
+        for (slot, fd) in payload.chunks_exact_mut(mem::size_of::<RawFd>()).zip(fds) {
+            slot.copy_from_slice(&fd.to_ne_bytes());
+        }
         Ok(())
     }
 
@@ -301,14 +403,7 @@ impl<'a> SocketAncillary<'a> {
     /// ancillary.clear();
     /// ```
     pub fn add_fds(&mut self, fds: &[BorrowedFd<'a>]) -> Result<(), AncillaryError> {
-        let raw: Vec<RawFd> = fds.iter().map(|f| f.as_raw_fd()).collect();
-        // SAFETY: RawFd is an integer without padding.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), mem::size_of_val(&raw[..]))
-        };
-        self.add_cmsg(libc::SOL_SOCKET, libc::SCM_RIGHTS, bytes)?;
-        self.borrowed.extend_from_slice(fds);
-        Ok(())
+        self.add_rights(fds.iter().map(|f| f.as_raw_fd()))
     }
 
     /// Drain received messages exactly once. Send buffers yield no messages.
@@ -331,7 +426,6 @@ impl<'a> SocketAncillary<'a> {
     /// drop and reconstruct it to release that lifetime constraint.
     pub fn clear(&mut self) {
         self.received.clear();
-        self.borrowed.clear();
         self.length = 0;
         self.truncated = false;
         self.receive_mode = false;
@@ -352,4 +446,66 @@ pub fn __fuzz_parse(buf: &[u8]) -> usize {
         count += 1;
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::IntoRawFd;
+
+    /// Apple reports the full `cmsg_len` of a truncated message but copies only
+    /// what fit. Descriptors in the copied part must still become owned.
+    #[test]
+    fn oversized_cmsg_len_owns_the_descriptors_that_fit() {
+        let raw = tempfile::tempfile().unwrap().into_raw_fd();
+        // SAFETY: raw stays open until the OwnedFd below closes it.
+        let fd = unsafe { BorrowedFd::borrow_raw(raw) };
+        let mut storage = vec![0u8; SocketAncillary::buffer_size_for_rights(3)];
+        let mut ancillary = SocketAncillary::new(&mut storage);
+        ancillary.add_fds(&[fd, fd, fd]).unwrap();
+        let fits = header_len() + mem::size_of::<RawFd>();
+
+        // SAFETY: only the first encoded descriptor is inside the slice, and
+        // this test owns it.
+        let mut messages = unsafe { take_received(&ancillary.buffer[..fits]) };
+
+        assert_eq!(messages.len(), 1);
+        let fds = messages[0].fds();
+        assert_eq!(fds.len(), 1);
+        assert_eq!(fds[0].as_raw_fd(), raw);
+        messages.clear();
+        // SAFETY: F_GETFD on any int is defined.
+        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+    }
+
+    #[test]
+    fn partial_descriptor_bytes_are_ignored() {
+        let mut storage = vec![0u8; SocketAncillary::buffer_size_for_rights(2)];
+        let mut ancillary = SocketAncillary::new(&mut storage);
+        // SAFETY: the value is never used as a descriptor; the slice below
+        // holds less than one encoded fd.
+        let fd = unsafe { BorrowedFd::borrow_raw(0) };
+        ancillary.add_fds(&[fd, fd]).unwrap();
+        let cut = header_len() + mem::size_of::<RawFd>() - 1;
+        // SAFETY: no whole descriptor is inside the slice.
+        let messages = unsafe { take_received(&ancillary.buffer[..cut]) };
+        assert!(messages.iter().all(|message| message.fds().is_empty()));
+    }
+
+    #[test]
+    fn adding_no_descriptors_writes_no_header() {
+        let mut storage = [0u8; 64];
+        let mut ancillary = SocketAncillary::new(&mut storage);
+        ancillary.add_fds(&[]).unwrap();
+        assert_eq!(ancillary.length, 0);
+    }
+
+    #[test]
+    fn cmsg_space_matches_libc() {
+        for payload in [0usize, 1, 4, 8, 12, 253 * 4] {
+            // SAFETY: pure calculation.
+            let expected = unsafe { libc::CMSG_SPACE(payload as u32) } as usize;
+            assert_eq!(cmsg_space(payload), Some(expected));
+        }
+    }
 }

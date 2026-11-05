@@ -6,6 +6,29 @@
 
 - Sends without descriptors no longer attach an empty `SCM_RIGHTS` header;
   they are a plain `sendmsg` with no control message, and allocate nothing.
+  `add_fds(&[])` now writes no header either.
+- macOS: a send to a closed peer returns `BrokenPipe` as documented. It returned
+  `InvalidInput` because `SO_NOSIGPIPE` fails with `EINVAL` on that socket.
+- macOS: a truncated `SCM_RIGHTS` message no longer leaks the descriptors that fit.
+  XNU keeps the full `cmsg_len`, and the parser rejected the whole message.
+- `cmsg_space` no longer panics on `sparcv9-sun-solaris`.
+- Raise the dependency floors to versions the crate builds against: `libc` 0.2.80
+  and `tokio` 1.28.
+- Correct the docs on when `SO_PASSCRED` must be set, and note that the `tokio`
+  feature needs a pin on Rust 1.75.
+
+### Performance
+
+- `send_fds` and low-level sends no longer allocate. `recv_fds_into` went from 4
+  allocations to 1 with descriptors, and from 1 to 0 without. Measured on Linux
+  x86-64 for one descriptor.
+
+### Additions
+
+- `seqpacket` module: descriptor passing on `SOCK_SEQPACKET` sockets, with async
+  forms under the `tokio` feature.
+- `cmsg_recvmsg_peek` on Linux and Android.
+- `ReceivedFds::surplus_closed`.
 
 ## [0.6.1] - 2026-10-08
 

@@ -54,15 +54,35 @@ pub(crate) mod fallback {
     pub(crate) fn cloexec_received(
         messages: &[crate::ancillary::ReceivedMessage],
     ) -> io::Result<()> {
+        for message in messages {
+            cloexec_fds(message.fds())?;
+        }
+        Ok(())
+    }
+
+    /// Flat-list form of [`cloexec_received`], with the same batch contract.
+    pub(crate) fn cloexec_fds(fds: &[std::os::fd::OwnedFd]) -> io::Result<()> {
         use std::os::fd::AsRawFd;
-        for fd in messages.iter().flat_map(|message| message.fds()) {
+        for fd in fds {
             set_cloexec(fd.as_raw_fd())?;
         }
         Ok(())
     }
 
+    /// XNU rejects every `setsockopt` with `EINVAL` once a socket is shut down
+    /// in both directions, which is what a closed peer leaves behind. A send
+    /// would have failed with `EPIPE`, so report that. Not ignored: on a socket
+    /// without `SO_NOSIGPIPE` the send could raise `SIGPIPE`.
+    pub(crate) fn nosigpipe_error(err: io::Error) -> io::Error {
+        if err.raw_os_error() == Some(libc::EINVAL) {
+            io::Error::from_raw_os_error(libc::EPIPE)
+        } else {
+            err
+        }
+    }
+
     /// Hard ceiling on the dynamic cap to bound buffer size against bogus or
-    /// `RLIM_INFINITY` values. 1M fds × 4 bytes ≈ 4 MiB cmsg buffer — far
+    /// `RLIM_INFINITY` values. 1M fds × 4 bytes ≈ 4 MiB cmsg buffer. This is
     /// used as an allocation budget, not a proof against kernel truncation.
     pub(crate) const HARD_CEILING: usize = 1 << 20;
 
@@ -131,6 +151,12 @@ mod inner {
         Ok(())
     }
 
+    /// No-op on platforms with `MSG_CMSG_CLOEXEC` — kernel handled it.
+    #[inline]
+    pub(crate) fn cloexec_fds(_fds: &[std::os::fd::OwnedFd]) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Linux/Android SCM_MAX_FD and the default receive budget on BSD.
     /// BSD kernel limits may differ; truncation must still be handled.
     #[inline]
@@ -153,7 +179,7 @@ mod inner {
     /// brief inherit-across-exec race.
     pub(crate) const RECV_FLAGS: libc::c_int = 0;
 
-    pub(crate) use super::fallback::{cloexec_received, max_recv_fds};
+    pub(crate) use super::fallback::{cloexec_fds, cloexec_received, max_recv_fds};
 
     #[cfg(target_vendor = "apple")]
     mod send_flags {
@@ -168,8 +194,7 @@ mod inner {
 
         /// Suppress `SIGPIPE` on Apple platforms via `SO_NOSIGPIPE`. This
         /// costs one extra syscall per send because the extension traits hold
-        /// no per-socket state; `FdChannel` will own its socket and can hoist
-        /// this to construction.
+        /// no per-socket state.
         pub(crate) fn prepare_send(fd: RawFd) -> io::Result<()> {
             let on: libc::c_int = 1;
             // SAFETY: fd is a live socket; setsockopt is always defined and
@@ -184,7 +209,9 @@ mod inner {
                 )
             };
             if ret < 0 {
-                Err(io::Error::last_os_error())
+                Err(crate::platform::fallback::nosigpipe_error(
+                    io::Error::last_os_error(),
+                ))
             } else {
                 Ok(())
             }
@@ -230,6 +257,15 @@ mod tests {
             fallback::clamp_nofile(u64::MAX as libc::rlim_t),
             fallback::HARD_CEILING,
         );
+    }
+
+    #[test]
+    fn nosigpipe_einval_becomes_broken_pipe() {
+        use std::io::{Error, ErrorKind};
+        let mapped = fallback::nosigpipe_error(Error::from_raw_os_error(libc::EINVAL));
+        assert_eq!(mapped.kind(), ErrorKind::BrokenPipe);
+        let other = fallback::nosigpipe_error(Error::from_raw_os_error(libc::ENOTSOCK));
+        assert_eq!(other.raw_os_error(), Some(libc::ENOTSOCK));
     }
 
     /// Exercise the exact macOS post-recv path on Linux: receive an fd with
