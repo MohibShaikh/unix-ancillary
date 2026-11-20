@@ -1,6 +1,6 @@
 //! Heap allocations per handoff, counted per thread so the test harness cannot
-//! disturb the numbers. Linux only: macOS sizes its receive budget from
-//! `RLIMIT_NOFILE`, which CI runners may set too high for the stack buffer.
+//! disturb the numbers. Linux only: other platforms have not had their counts
+//! measured.
 #![cfg(target_os = "linux")]
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -105,6 +105,32 @@ fn reused_low_level_receive_allocates_once_per_rights_message() {
     )
     .unwrap();
     tx.send_fds(b"x", &[&file]).unwrap();
+    let (count, _) = allocations(|| {
+        cmsg_recvmsg(
+            rx.as_fd(),
+            &mut [IoSliceMut::new(&mut data)],
+            &mut ancillary,
+        )
+        .unwrap()
+    });
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn low_level_receive_allocation_does_not_grow_with_descriptors() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = std::fs::File::open("/dev/null").unwrap();
+    let mut storage = vec![0u8; SocketAncillary::buffer_size_for_rights(64)];
+    let mut ancillary = SocketAncillary::new(&mut storage);
+    let mut data = [0u8; 8];
+    tx.send_fds(b"x", &[&file; 64]).unwrap();
+    cmsg_recvmsg(
+        rx.as_fd(),
+        &mut [IoSliceMut::new(&mut data)],
+        &mut ancillary,
+    )
+    .unwrap();
+    tx.send_fds(b"x", &[&file; 64]).unwrap();
     let (count, _) = allocations(|| {
         cmsg_recvmsg(
             rx.as_fd(),

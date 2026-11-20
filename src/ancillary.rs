@@ -4,7 +4,7 @@ use std::os::unix::io::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::{fmt, mem};
 
 /// The ancillary buffer is too small, or must be cleared before building a send.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AncillaryError;
 
 impl fmt::Display for AncillaryError {
@@ -14,7 +14,14 @@ impl fmt::Display for AncillaryError {
 }
 impl std::error::Error for AncillaryError {}
 
+impl From<AncillaryError> for std::io::Error {
+    fn from(err: AncillaryError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
+    }
+}
+
 /// Received ancillary data from a Unix socket.
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum AncillaryData<'a> {
     /// Owned descriptors. Unconsumed descriptors close when the iterator drops.
@@ -26,6 +33,7 @@ pub enum AncillaryData<'a> {
 
 /// Draining iterator over received descriptors. Each descriptor is yielded once.
 /// Dropping this iterator closes every descriptor not yet yielded.
+#[derive(Debug)]
 pub struct ScmRights<'a> {
     inner: std::vec::IntoIter<OwnedFd>,
     _marker: PhantomData<&'a ()>,
@@ -41,6 +49,10 @@ impl Iterator for ScmRights<'_> {
     }
 }
 
+impl ExactSizeIterator for ScmRights<'_> {}
+impl std::iter::FusedIterator for ScmRights<'_> {}
+
+#[derive(Debug)]
 pub(crate) enum ReceivedMessage {
     Rights(Vec<OwnedFd>),
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -58,6 +70,7 @@ impl ReceivedMessage {
 }
 
 /// Drains received control messages. Dropping it closes unconsumed descriptors.
+#[derive(Debug)]
 pub struct Messages<'a> {
     inner: std::vec::Drain<'a, ReceivedMessage>,
 }
@@ -74,7 +87,13 @@ impl<'a> Iterator for Messages<'a> {
             ReceivedMessage::Credentials(creds) => AncillaryData::Credentials(creds),
         })
     }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
 }
+
+impl ExactSizeIterator for Messages<'_> {}
+impl std::iter::FusedIterator for Messages<'_> {}
 
 fn header_len() -> usize {
     // SAFETY: pure calculation with a zero payload, no pointers or overflow.
@@ -90,8 +109,8 @@ fn cmsg_space(payload_len: usize) -> Option<usize> {
     Some(unsafe { libc::CMSG_SPACE(payload_len) } as usize)
 }
 
-/// Stack space for control messages. Covers Linux's whole receive budget, so
-/// the common paths never touch the heap.
+/// Stack space for control messages. Covers Linux, Android, Apple and default
+/// receive budgets so the common paths never touch the heap.
 const STACK_CONTROL: usize = 4096;
 
 /// Run `f` with `size` zeroed bytes of cmsghdr-aligned control storage.
@@ -210,13 +229,11 @@ pub(crate) unsafe fn take_received_into(buffer: &[u8], messages: &mut Vec<Receiv
             close_pidfd(&message)
         };
         if message.level == libc::SOL_SOCKET && message.kind == libc::SCM_RIGHTS {
-            let fds = message
-                .rights()
-                .map(|raw| {
-                    // SAFETY: guaranteed by this function's fresh-recv contract.
-                    unsafe { OwnedFd::from_raw_fd(raw) }
-                })
-                .collect();
+            let mut fds = Vec::with_capacity(message.data.len() / mem::size_of::<RawFd>());
+            fds.extend(message.rights().map(|raw| {
+                // SAFETY: guaranteed by this function's fresh-recv contract.
+                unsafe { OwnedFd::from_raw_fd(raw) }
+            }));
             messages.push(ReceivedMessage::Rights(fds));
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -283,6 +300,18 @@ pub struct SocketAncillary<'a> {
     borrowed: PhantomData<BorrowedFd<'a>>,
 }
 
+impl fmt::Debug for SocketAncillary<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SocketAncillary")
+            .field("capacity", &self.buffer.len())
+            .field("length", &self.length)
+            .field("truncated", &self.truncated)
+            .field("receive_mode", &self.receive_mode)
+            .field("received", &self.received.len())
+            .finish()
+    }
+}
+
 impl<'a> SocketAncillary<'a> {
     /// Create empty storage. Any byte-slice alignment is accepted.
     pub fn new(buffer: &'a mut [u8]) -> Self {
@@ -296,13 +325,16 @@ impl<'a> SocketAncillary<'a> {
         }
     }
 
-    /// Buffer size for one SCM_RIGHTS message containing `num_fds` descriptors.
-    /// Panics if the size cannot be represented by usize.
-    pub fn buffer_size_for_rights(num_fds: usize) -> usize {
+    pub(crate) fn checked_buffer_size_for_rights(num_fds: usize) -> Option<usize> {
         num_fds
             .checked_mul(mem::size_of::<RawFd>())
             .and_then(cmsg_space)
-            .expect("ancillary buffer size overflow")
+    }
+
+    /// Buffer size for one SCM_RIGHTS message containing `num_fds` descriptors.
+    /// Panics if the size cannot be represented by usize.
+    pub fn buffer_size_for_rights(num_fds: usize) -> usize {
+        Self::checked_buffer_size_for_rights(num_fds).expect("ancillary buffer size overflow")
     }
 
     /// Additional space for one SCM_CREDENTIALS message.
@@ -315,6 +347,12 @@ impl<'a> SocketAncillary<'a> {
     /// [`crate::ScmCredentials::for_this_process`] supplies permitted values.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn add_credentials(&mut self, creds: crate::ScmCredentials) -> Result<(), AncillaryError> {
+        const _: () = assert!(
+            mem::size_of::<libc::ucred>()
+                == mem::size_of::<libc::pid_t>()
+                    + mem::size_of::<libc::uid_t>()
+                    + mem::size_of::<libc::gid_t>()
+        );
         let cred = creds.to_ucred();
         // ucred is three consecutive integer fields without padding on Linux/Android.
         let bytes = unsafe {
@@ -457,7 +495,10 @@ mod tests {
     /// what fit. Descriptors in the copied part must still become owned.
     #[test]
     fn oversized_cmsg_len_owns_the_descriptors_that_fit() {
-        let raw = tempfile::tempfile().unwrap().into_raw_fd();
+        // A parallel test can reuse a closed fd number, so prove the close through
+        // the peer seeing end of stream rather than by probing the number.
+        let (owned_end, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let raw = owned_end.into_raw_fd();
         // SAFETY: raw stays open until the OwnedFd below closes it.
         let fd = unsafe { BorrowedFd::borrow_raw(raw) };
         let mut storage = vec![0u8; SocketAncillary::buffer_size_for_rights(3)];
@@ -474,8 +515,8 @@ mod tests {
         assert_eq!(fds.len(), 1);
         assert_eq!(fds[0].as_raw_fd(), raw);
         messages.clear();
-        // SAFETY: F_GETFD on any int is defined.
-        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+        let mut byte = [0u8; 1];
+        assert_eq!(std::io::Read::read(&mut peer, &mut byte).unwrap(), 0);
     }
 
     #[test]

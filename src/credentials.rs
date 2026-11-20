@@ -35,6 +35,12 @@ pub struct ScmCredentials {
 impl ScmCredentials {
     /// The values this process may always send without privileges.
     ///
+    /// Reads the process id and the real user and group ids (`getpid`,
+    /// `getuid`, `getgid`). Note that when the kernel auto-attaches credentials
+    /// under `SO_PASSCRED`, it uses effective ids; in a setuid/setgid process,
+    /// pass effective ids via [`new`](Self::new) if you want the explicit claim
+    /// to match.
+    ///
     /// Use this unless you specifically need to claim something else. The
     /// kernel checks the values on send: an unprivileged process may only
     /// claim its own pid, and a uid and gid that are its real, effective or

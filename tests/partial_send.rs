@@ -50,5 +50,9 @@ fn completion_loop_finishes_the_payload_with_one_descriptor() {
     assert_eq!(total, expected);
     let mut rest = [0u8; 1];
     rx.set_nonblocking(true).unwrap();
-    assert!(rx.read(&mut rest).is_err() || rest[0] == 0);
+    match rx.read(&mut rest) {
+        Ok(0) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("unexpected trailing data: {other:?}"),
+    }
 }

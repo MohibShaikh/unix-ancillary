@@ -34,7 +34,12 @@ pub(crate) fn sendmsg_vectored(
 
     if ancillary_len > 0 {
         msg.msg_control = ancillary_buf.as_ptr() as *mut libc::c_void;
-        msg.msg_controllen = ancillary_len as _;
+        #[allow(clippy::useless_conversion)]
+        {
+            msg.msg_controllen = ancillary_len.try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "ancillary length overflow")
+            })?;
+        }
     }
 
     // SAFETY: msghdr fully populated; iov and ancillary_buf borrowed for the
@@ -67,7 +72,15 @@ pub(crate) fn recvmsg_raw(
     msg.msg_iov = iov.as_mut_ptr() as *mut libc::iovec;
     msg.msg_iovlen = iov.len() as _;
     msg.msg_control = ancillary_buf.as_mut_ptr() as *mut libc::c_void;
-    msg.msg_controllen = ancillary_buf.len() as _;
+    #[allow(clippy::useless_conversion)]
+    {
+        msg.msg_controllen = ancillary_buf.len().try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ancillary buffer length overflow",
+            )
+        })?;
+    }
 
     // SAFETY: msghdr fully populated; ancillary_buf borrowed mutably for the
     // syscall duration; fd is a valid descriptor.
@@ -86,9 +99,10 @@ pub(crate) fn recvmsg_raw(
     };
 
     #[allow(clippy::unnecessary_cast)]
+    let ancillary_len = (msg.msg_controllen as usize).min(ancillary_buf.len());
     Ok(RecvMsgResult {
         bytes_read: ret as usize,
-        ancillary_len: msg.msg_controllen as usize,
+        ancillary_len,
         ancillary_truncated: (msg.msg_flags & libc::MSG_CTRUNC) != 0,
         data_truncated: (msg.msg_flags & libc::MSG_TRUNC) != 0,
     })
