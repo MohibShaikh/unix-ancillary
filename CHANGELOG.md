@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.6.3] - 2026-11-21
+
+### Performance
+
+- macOS: convenience receives now reserve XNU's 254-descriptor message limit
+  instead of sizing from `RLIMIT_NOFILE`, removing a per-receive `getrlimit`
+  syscall and up to 4 MiB of heap churn per receive (and per `WouldBlock` retry
+  in Tokio). Other non-`MSG_CMSG_CLOEXEC` targets (illumos, Solaris) clamp
+  receive storage to `253..=1000` so it stays on the stack.
+- macOS: close-on-exec post-processing now uses one `fcntl(F_SETFD)` per
+  descriptor instead of `F_GETFD` + `F_SETFD`.
+- Low-level `cmsg_recvmsg` pre-sizes each `SCM_RIGHTS` descriptor `Vec` so
+  multi-descriptor receives allocate once instead of growing repeatedly.
+
+### Fixes
+
+- Convenience receives now reject `MSG_TRUNC` unconditionally, so a
+  `SOCK_SEQPACKET` socket wrapped as a `UnixStream` reports `InvalidData`
+  instead of silently dropping the tail of a long message. Real streams never
+  set `MSG_TRUNC`.
+- Huge `const N` values on convenience receives (such as `usize::MAX`) no
+  longer panic on buffer-size overflow.
+- illumos and Solaris sends now set `MSG_NOSIGNAL` (compile-checked only; not
+  tested on those kernels), and `x86_64-unknown-illumos` compiles cleanly with
+  warnings denied.
+- Document that blocking `UnixStreamExt::send_fds_all` returning `WouldBlock`
+  on a non-blocking socket may already have sent the descriptors, fix the
+  copy-pasted EOF note on `UnixDatagramExt::recv_fds_exact`, and clarify real
+  vs. effective ids on `ScmCredentials::for_this_process`.
+- Eliminate fd-number reuse races in descriptor-drop tests.
+
+### Additions
+
+- `Debug` on `SocketAncillary`, `Messages`, `AncillaryData`, and `ScmRights`.
+- `ExactSizeIterator` and `FusedIterator` on `ScmRights` and `Messages`.
+- `PartialEq` and `Eq` on `AncillaryError`, and `From<AncillaryError> for io::Error`.
+
 ## [0.6.2] - 2026-11-05
 
 ### Fixes
