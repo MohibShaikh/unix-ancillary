@@ -187,7 +187,7 @@ mod inner {
 
     /// illumos and Solaris provide `MSG_NOSIGNAL` in libc (compile-checked
     /// only; not tested on those kernels). Other Unix targets (such as AIX)
-    /// have no portable `sendmsg` signal suppression in libc — set `SIGPIPE`
+    /// have no portable `sendmsg` signal suppression in libc: set `SIGPIPE`
     /// to `SIG_IGN` or handle it in your process.
     #[cfg(not(target_vendor = "apple"))]
     mod send_flags {

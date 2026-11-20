@@ -78,7 +78,7 @@
 //!   [`cmsg_recvmsg`] to inspect a truncated datagram via
 //!   [`RecvResult::data_truncated`].
 //! - Sends are `SIGPIPE`-safe (`MSG_NOSIGNAL` on Linux, Android, BSD, and
-//!   illumos/Solaris; `SO_NOSIGPIPE` on Apple — illumos/Solaris are
+//!   illumos/Solaris; `SO_NOSIGPIPE` on Apple; illumos/Solaris are
 //!   compile-checked only) and retry internally on `EINTR`.
 
 #![deny(unsafe_op_in_unsafe_fn)]

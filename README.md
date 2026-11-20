@@ -76,7 +76,7 @@ processes retain their normal OS permissions; this example does not sandbox them
 - `send_fds_all`: attach descriptors once and finish the payload. An error or
   async cancellation can leave a prefix delivered; discard or otherwise recover
   the connection through your protocol. On a non-blocking socket, `WouldBlock`
-  from the blocking form may occur after descriptors were already sent — do not
+  from the blocking form may occur after descriptors were already sent; do not
   retry `send_fds_all`. Concurrent writers must serialize whole protocol
   operations if interleaving would be invalid.
 - `recv_fds` / `recv_fds_into`: receive up to `N` descriptors and close surplus.

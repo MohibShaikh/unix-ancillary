@@ -37,7 +37,7 @@ impl ScmCredentials {
     ///
     /// Reads the process id and the real user and group ids (`getpid`,
     /// `getuid`, `getgid`). Note that when the kernel auto-attaches credentials
-    /// under `SO_PASSCRED`, it uses effective ids — in a setuid/setgid process,
+    /// under `SO_PASSCRED`, it uses effective ids; in a setuid/setgid process,
     /// pass effective ids via [`new`](Self::new) if you want the explicit claim
     /// to match.
     ///
