@@ -206,6 +206,7 @@ async fn async_recv_exact_datagram_accepts_exact_count() {
 fn async_futures_are_send(
     stream: &UnixStream,
     datagram: &UnixDatagram,
+    seq: &tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
     iov: &mut [std::io::IoSliceMut<'_>],
     buf: &mut [u8],
     file: &std::fs::File,
@@ -225,4 +226,13 @@ fn async_futures_are_send(
     send(datagram.recv_fds_exact::<1>());
     send(datagram.recv_fds_into::<1>(buf));
     send(datagram.recv_fds_exact_into::<1>(buf));
+    send(unix_ancillary::seqpacket::tokio::send_fds(
+        seq,
+        b"x",
+        &[file],
+    ));
+    send(unix_ancillary::seqpacket::tokio::recv_fds_into::<1, _>(
+        seq, buf,
+    ));
+    send(unix_ancillary::seqpacket::tokio::recv_fds_exact_into::<1, _>(seq, buf));
 }

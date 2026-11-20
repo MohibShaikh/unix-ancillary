@@ -12,7 +12,7 @@
 use std::io;
 use std::os::unix::io::{AsFd, OwnedFd};
 
-use crate::ext::{recv_fds_into_impl, recv_owned_impl, send_fds_impl, CountMode, SocketKind};
+use crate::ext::{recv_fds_into_impl, recv_owned_impl, send_fds_impl, CountMode};
 use crate::ReceivedFds;
 
 /// Longest payload [`recv_fds`] accepts: the 64 KiB datagram default.
@@ -27,12 +27,7 @@ pub fn send_fds(sock: &impl AsFd, data: &[u8], fds: &[impl AsFd]) -> io::Result<
 /// A closed peer returns an empty result.
 pub fn recv_fds<const N: usize>(sock: &impl AsFd) -> io::Result<ReceivedFds> {
     let mut data_buf = vec![0u8; DEFAULT_BUF];
-    recv_owned_impl(
-        sock.as_fd(),
-        &mut data_buf,
-        SocketKind::Datagram,
-        CountMode::UpTo(N),
-    )
+    recv_owned_impl(sock.as_fd(), &mut data_buf, CountMode::UpTo(N))
 }
 
 /// Like [`recv_fds`], but into a caller-supplied buffer. Returns `(bytes_read, fds)`.
@@ -40,12 +35,7 @@ pub fn recv_fds_into<const N: usize>(
     sock: &impl AsFd,
     data_buf: &mut [u8],
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    recv_fds_into_impl(
-        sock.as_fd(),
-        data_buf,
-        SocketKind::Datagram,
-        CountMode::UpTo(N),
-    )
+    recv_fds_into_impl(sock.as_fd(), data_buf, CountMode::UpTo(N))
 }
 
 /// Like [`recv_fds_into`], but `InvalidData` unless exactly `N` descriptors arrived.
@@ -53,12 +43,7 @@ pub fn recv_fds_exact_into<const N: usize>(
     sock: &impl AsFd,
     data_buf: &mut [u8],
 ) -> io::Result<(usize, Vec<OwnedFd>)> {
-    recv_fds_into_impl(
-        sock.as_fd(),
-        data_buf,
-        SocketKind::Datagram,
-        CountMode::Exact(N),
-    )
+    recv_fds_into_impl(sock.as_fd(), data_buf, CountMode::Exact(N))
 }
 
 /// Async forms over a nonblocking socket registered with tokio's
@@ -85,12 +70,7 @@ pub mod tokio {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         sock.async_io(Interest::READABLE, |s| {
-            recv_fds_into_impl(
-                s.as_fd(),
-                &mut *data_buf,
-                SocketKind::Datagram,
-                CountMode::UpTo(N),
-            )
+            recv_fds_into_impl(s.as_fd(), &mut *data_buf, CountMode::UpTo(N))
         })
         .await
     }
@@ -101,12 +81,7 @@ pub mod tokio {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         sock.async_io(Interest::READABLE, |s| {
-            recv_fds_into_impl(
-                s.as_fd(),
-                &mut *data_buf,
-                SocketKind::Datagram,
-                CountMode::Exact(N),
-            )
+            recv_fds_into_impl(s.as_fd(), &mut *data_buf, CountMode::Exact(N))
         })
         .await
     }

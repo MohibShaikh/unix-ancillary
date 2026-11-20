@@ -18,9 +18,10 @@
 //! Convenience receives reject ancillary truncation and datagram payload
 //! truncation with `InvalidData`, closing every descriptor delivered in the
 //! control buffer. Linux/Android reserve room for 253 descriptors plus sender
-//! credentials. BSD uses a 253-descriptor receive budget; this is not a claim
-//! about every BSD kernel's maximum. macOS uses a bounded `RLIMIT_NOFILE`
-//! estimate. Additional control messages or platform limits can still cause
+//! credentials. BSD uses a 253-descriptor floor; this is not a claim about
+//! every BSD kernel's maximum. macOS reserves 254 descriptors (XNU's single-
+//! message limit). Other targets reserve the requested count clamped to
+//! `253..=1000`. Additional control messages or platform limits can still cause
 //! truncation; callers must handle the error.
 //!
 //! Low-level [`cmsg_recvmsg`] exposes truncation flags and owns the delivered
@@ -76,8 +77,9 @@
 //! - Datagram methods reject payload truncation with `InvalidData`; use
 //!   [`cmsg_recvmsg`] to inspect a truncated datagram via
 //!   [`RecvResult::data_truncated`].
-//! - Sends are `SIGPIPE`-safe (`MSG_NOSIGNAL` / `SO_NOSIGPIPE`) and retry
-//!   internally on `EINTR`.
+//! - Sends are `SIGPIPE`-safe (`MSG_NOSIGNAL` on Linux, Android, BSD, and
+//!   illumos/Solaris; `SO_NOSIGPIPE` on Apple — illumos/Solaris are
+//!   compile-checked only) and retry internally on `EINTR`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc = include_str!("../MIGRATION.md")]

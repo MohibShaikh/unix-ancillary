@@ -20,8 +20,8 @@ use tokio::net::{UnixDatagram, UnixStream};
 use crate::cmsg;
 use crate::ext::{
     iov_len, recv_fds_into_impl, recv_fds_into_vectored_impl, recv_owned_impl, send_fds_impl,
-    send_fds_vectored_impl, validate_stream_send, CountMode, ReceivedFds, SocketKind,
-    DEFAULT_DATAGRAM_BUF, DEFAULT_STREAM_BUF,
+    send_fds_vectored_impl, validate_stream_send, CountMode, ReceivedFds, DEFAULT_DATAGRAM_BUF,
+    DEFAULT_STREAM_BUF,
 };
 
 /// Async fd passing on tokio's [`UnixStream`].
@@ -84,7 +84,10 @@ pub trait AsyncUnixStreamExt {
     ///
     /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
     /// when the peer sends fewer or more than `N` descriptors. Surplus
-    /// descriptors are still closed before the error is returned.
+    /// descriptors are still closed before the error is returned, and the
+    /// bytes from that receive are discarded. A closed peer also counts as
+    /// receiving zero descriptors, so with `N > 0` end of stream is this same
+    /// error. Use [`recv_fds`](Self::recv_fds) to tell the two apart.
     async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
@@ -118,12 +121,7 @@ impl AsyncUnixStreamExt for UnixStream {
         iov: &mut [io::IoSliceMut<'_>],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_vectored_impl(
-                self.as_fd(),
-                &mut *iov,
-                SocketKind::Stream,
-                CountMode::UpTo(N),
-            )
+            recv_fds_into_vectored_impl(self.as_fd(), &mut *iov, CountMode::UpTo(N))
         })
         .await
     }
@@ -171,12 +169,7 @@ impl AsyncUnixStreamExt for UnixStream {
     async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
         self.async_io(Interest::READABLE, || {
-            recv_owned_impl(
-                self.as_fd(),
-                &mut data_buf,
-                SocketKind::Stream,
-                CountMode::UpTo(N),
-            )
+            recv_owned_impl(self.as_fd(), &mut data_buf, CountMode::UpTo(N))
         })
         .await
     }
@@ -186,12 +179,7 @@ impl AsyncUnixStreamExt for UnixStream {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(
-                self.as_fd(),
-                &mut *data_buf,
-                SocketKind::Stream,
-                CountMode::UpTo(N),
-            )
+            recv_fds_into_impl(self.as_fd(), &mut *data_buf, CountMode::UpTo(N))
         })
         .await
     }
@@ -199,12 +187,7 @@ impl AsyncUnixStreamExt for UnixStream {
     async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_STREAM_BUF];
         self.async_io(Interest::READABLE, || {
-            recv_owned_impl(
-                self.as_fd(),
-                &mut data_buf,
-                SocketKind::Stream,
-                CountMode::Exact(N),
-            )
+            recv_owned_impl(self.as_fd(), &mut data_buf, CountMode::Exact(N))
         })
         .await
     }
@@ -214,12 +197,7 @@ impl AsyncUnixStreamExt for UnixStream {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(
-                self.as_fd(),
-                &mut *data_buf,
-                SocketKind::Stream,
-                CountMode::Exact(N),
-            )
+            recv_fds_into_impl(self.as_fd(), &mut *data_buf, CountMode::Exact(N))
         })
         .await
     }
@@ -250,7 +228,8 @@ pub trait AsyncUnixDatagramExt {
     ///
     /// Like [`recv_fds`](Self::recv_fds), but errors with `InvalidData`
     /// when the peer sends fewer or more than `N` descriptors. Surplus
-    /// descriptors are still closed before the error is returned.
+    /// descriptors are still closed before the error is returned, and the
+    /// datagram payload from that receive is discarded.
     async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds>;
 
     /// Like [`recv_fds_exact`](Self::recv_fds_exact) but writes data into a
@@ -272,12 +251,7 @@ impl AsyncUnixDatagramExt for UnixDatagram {
     async fn recv_fds<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
         self.async_io(Interest::READABLE, || {
-            recv_owned_impl(
-                self.as_fd(),
-                &mut data_buf,
-                SocketKind::Datagram,
-                CountMode::UpTo(N),
-            )
+            recv_owned_impl(self.as_fd(), &mut data_buf, CountMode::UpTo(N))
         })
         .await
     }
@@ -287,12 +261,7 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(
-                self.as_fd(),
-                &mut *data_buf,
-                SocketKind::Datagram,
-                CountMode::UpTo(N),
-            )
+            recv_fds_into_impl(self.as_fd(), &mut *data_buf, CountMode::UpTo(N))
         })
         .await
     }
@@ -300,12 +269,7 @@ impl AsyncUnixDatagramExt for UnixDatagram {
     async fn recv_fds_exact<const N: usize>(&self) -> io::Result<ReceivedFds> {
         let mut data_buf = vec![0u8; DEFAULT_DATAGRAM_BUF];
         self.async_io(Interest::READABLE, || {
-            recv_owned_impl(
-                self.as_fd(),
-                &mut data_buf,
-                SocketKind::Datagram,
-                CountMode::Exact(N),
-            )
+            recv_owned_impl(self.as_fd(), &mut data_buf, CountMode::Exact(N))
         })
         .await
     }
@@ -315,12 +279,7 @@ impl AsyncUnixDatagramExt for UnixDatagram {
         data_buf: &mut [u8],
     ) -> io::Result<(usize, Vec<OwnedFd>)> {
         self.async_io(Interest::READABLE, || {
-            recv_fds_into_impl(
-                self.as_fd(),
-                &mut *data_buf,
-                SocketKind::Datagram,
-                CountMode::Exact(N),
-            )
+            recv_fds_into_impl(self.as_fd(), &mut *data_buf, CountMode::Exact(N))
         })
         .await
     }

@@ -43,20 +43,22 @@ fn send_recv_multiple_fds() {
 #[test]
 fn owned_fd_closes_on_drop() {
     let (tx, rx) = UnixStream::pair().unwrap();
-
-    let file = tempfile::tempfile().unwrap();
-    tx.send_fds(b"x", &[&file]).unwrap();
+    // Prove closure via EOF on the peer rather than probing a raw fd number
+    // that a parallel test in this binary could immediately reuse.
+    let (passed, mut peer) = UnixStream::pair().unwrap();
+    tx.send_fds(b"x", &[&passed]).unwrap();
+    drop(passed);
 
     let recv = rx.recv_fds::<1>().unwrap();
-    let received_raw = recv.fds[0].as_raw_fd();
-
+    assert_eq!(recv.fds.len(), 1);
     drop(recv);
 
-    // SAFETY: probing whether the fd is still open via fcntl.
-    unsafe {
-        let ret = libc::fcntl(received_raw, libc::F_GETFD);
-        assert_eq!(ret, -1, "fd should be closed after OwnedFd drop");
-    }
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        peer.read(&mut byte).unwrap(),
+        0,
+        "peer should observe EOF once the received OwnedFd drops"
+    );
 }
 
 #[test]
@@ -296,4 +298,85 @@ fn recv_exact_datagram_accepts_exact_count() {
     let received = rx.recv_fds_exact::<2>().unwrap();
     assert_eq!(received.data, b"dg");
     assert_eq!(received.fds.len(), 2);
+}
+
+#[test]
+fn huge_descriptor_cap_does_not_panic() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"x", &[&file]).unwrap();
+
+    let mut buf = [0u8; 8];
+    let (n, fds) = rx.recv_fds_into::<{ usize::MAX }>(&mut buf).unwrap();
+    assert_eq!((n, fds.len()), (1, 1));
+}
+
+#[test]
+fn ancillary_types_implement_debug_exact_size_and_io_error() {
+    let (tx, rx) = UnixStream::pair().unwrap();
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"x", &[&file, &file]).unwrap();
+
+    let mut tiny = [0u8; 1];
+    let mut small_anc = SocketAncillary::new(&mut tiny);
+    let anc_err = small_anc.add_fds(&[file.as_fd()]).unwrap_err();
+    assert_eq!(anc_err, unix_ancillary::AncillaryError);
+    let io_err: std::io::Error = anc_err.into();
+    assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!format!("{small_anc:?}").is_empty());
+
+    let mut data = [0u8; 8];
+    let mut storage = [0u8; 128];
+    let mut recv_anc = SocketAncillary::new(&mut storage);
+    unix_ancillary::cmsg_recvmsg(
+        rx.as_fd(),
+        &mut [std::io::IoSliceMut::new(&mut data)],
+        &mut recv_anc,
+    )
+    .unwrap();
+    assert!(!format!("{recv_anc:?}").is_empty());
+
+    let mut msgs = recv_anc.messages();
+    assert_eq!(msgs.len(), 1);
+    assert!(!format!("{msgs:?}").is_empty());
+    let msg = msgs.next().unwrap();
+    assert!(!format!("{msg:?}").is_empty());
+    if let AncillaryData::ScmRights(rights) = msg {
+        assert_eq!(rights.len(), 2);
+        assert!(!format!("{rights:?}").is_empty());
+        assert_eq!(rights.count(), 2);
+    } else {
+        panic!("expected ScmRights");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn seqpacket_wrapped_as_stream_rejects_truncated_payload() {
+    use std::os::fd::FromRawFd;
+
+    let mut fds = [0; 2];
+    // SAFETY: socketpair writes two descriptors into `fds`.
+    let rc = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
+    assert_eq!(rc, 0);
+    // SAFETY: fresh descriptors owned exclusively by this test.
+    let (tx, rx) = unsafe {
+        (
+            UnixStream::from_raw_fd(fds[0]),
+            UnixStream::from_raw_fd(fds[1]),
+        )
+    };
+    let file = tempfile::tempfile().unwrap();
+    tx.send_fds(b"payload-too-long", &[&file]).unwrap();
+
+    let mut small = [0u8; 4];
+    let err = rx.recv_fds_into::<1>(&mut small).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }

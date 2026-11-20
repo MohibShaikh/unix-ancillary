@@ -75,8 +75,10 @@ processes retain their normal OS permissions; this example does not sandbox them
   of the payload. Do not resend them when completing the remaining bytes.
 - `send_fds_all`: attach descriptors once and finish the payload. An error or
   async cancellation can leave a prefix delivered; discard or otherwise recover
-  the connection through your protocol. Concurrent writers must serialize whole
-  protocol operations if interleaving would be invalid.
+  the connection through your protocol. On a non-blocking socket, `WouldBlock`
+  from the blocking form may occur after descriptors were already sent — do not
+  retry `send_fds_all`. Concurrent writers must serialize whole protocol
+  operations if interleaving would be invalid.
 - `recv_fds` / `recv_fds_into`: receive up to `N` descriptors and close surplus.
   The allocating variant uses 4 KiB for streams and 64 KiB for datagrams, and
   reports how many it closed in `surplus_closed`.
@@ -154,28 +156,31 @@ when your protocol validates them. See [migration examples](MIGRATION.md).
 - **macOS fork race:** a concurrent `fork` + `exec` between receive and `fcntl`
   can inherit a descriptor. Applications requiring that protection must
   coordinate both process creation and receiving with the same lock.
-- Sends suppress SIGPIPE on Linux/Android/BSD with `MSG_NOSIGNAL` and on Apple
-  with `SO_NOSIGPIPE`. Other Unix targets use a fallback without this guarantee.
+- Sends suppress SIGPIPE on Linux/Android/BSD and illumos/Solaris with
+  `MSG_NOSIGNAL` (illumos/Solaris are compile-checked only) and on Apple with
+  `SO_NOSIGPIPE`. Other Unix targets use a fallback without this guarantee.
 - Linux/Android convenience receives reserve space for 253 descriptors plus
-  credentials. BSD uses a 253-descriptor budget. macOS derives an allocation
-  budget from `RLIMIT_NOFILE`, capped at 1,048,576 descriptors. These budgets
-  do not make truncation impossible; applications must handle receive errors.
+  credentials. BSD uses a 253-descriptor floor. macOS reserves 254 descriptors
+  (XNU's single-message limit). Other targets without `MSG_CMSG_CLOEXEC` reserve
+  the requested count clamped to `253..=1000`. These budgets do not make
+  truncation impossible; applications must handle receive errors.
 - Every descriptor delivered in the control buffer is owned and cleaned up.
   Kernel handling of descriptors omitted by truncation is platform-specific;
   userspace cannot close descriptor numbers it was not given.
 - A send to a closed peer returns `BrokenPipe`. On Apple this comes from mapping
   the `EINVAL` that `SO_NOSIGPIPE` returns on such a socket.
-- CI executes tests on Linux and macOS, and compiles FreeBSD and Android without
-  running them. Nothing in CI checks kernel behavior on a BSD or on Android.
-  OpenBSD, NetBSD and DragonFly are not compiled in CI.
+- CI executes tests on Linux and macOS, and compiles FreeBSD, Android and
+  illumos without running them. Nothing in CI checks kernel behavior on BSD,
+  Android or illumos. OpenBSD, NetBSD and DragonFly are not compiled in CI.
 
 ## Cost
 
 A send allocates nothing. A receive allocates its returned `Vec` when descriptors
 arrive and nothing when none do; `recv_fds` also allocates its data buffer. Control
-storage stays on the stack up to 4 KiB. A macOS process with an `RLIMIT_NOFILE`
-above about 1,000 uses the heap for it, and also pays one `setsockopt` per send and
-one `getrlimit` per receive. `tests/allocations.rs` checks these counts on Linux.
+storage stays on the stack up to 4 KiB, covering Linux, Android, macOS, and
+default budgets on other targets. On macOS, sends pay one `setsockopt` and
+receives pay one `fcntl` per received descriptor. `tests/allocations.rs` checks
+these counts on Linux.
 
 ## Verification
 

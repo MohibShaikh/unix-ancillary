@@ -6,45 +6,23 @@
 //! everything else (notably macOS), where we must `fcntl(F_SETFD, FD_CLOEXEC)`
 //! after the syscall.
 //!
-//! The macOS fallback ([`fallback`]) is written against plain `fcntl`/
-//! `getrlimit`, which behave identically on Linux — nothing in it is
-//! Darwin-specific, it is merely *selected out* on kernels that offer
-//! `MSG_CMSG_CLOEXEC`. It is compiled on every platform so its logic can be
-//! unit-tested anywhere (see the tests at the bottom of this file), even
-//! though only non-`MSG_CMSG_CLOEXEC` targets wire it into the recv path.
+//! Nothing in the `fcntl` fallback ([`fallback`]) is Darwin-specific, so it is
+//! compiled on every platform and unit-tested on Linux (see the tests at the
+//! bottom of this file), even though only non-`MSG_CMSG_CLOEXEC` targets wire
+//! it into the receive path.
 
 /// The macOS / no-`MSG_CMSG_CLOEXEC` fallback, compiled on all platforms so it
-/// stays testable on Linux CI. Only `mod inner` on those targets calls it; on
-/// `MSG_CMSG_CLOEXEC` platforms it is reached solely from the unit tests, so
-/// suppress dead-code warnings there.
-#[cfg_attr(
-    any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd",
-        target_os = "dragonfly",
-        target_os = "netbsd",
-        target_os = "openbsd",
-    ),
-    allow(dead_code)
-)]
+/// stays testable on Linux CI.
+#[allow(dead_code)]
 pub(crate) mod fallback {
     use std::io;
-    use std::mem;
     use std::os::unix::io::RawFd;
 
     fn set_cloexec(fd: RawFd) -> io::Result<()> {
-        // SAFETY: F_GETFD/F_SETFD on a kernel-supplied fd is always defined;
-        // we propagate any errno the kernel returns.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFD);
-            if flags < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let ret = libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
-            if ret < 0 {
-                return Err(io::Error::last_os_error());
-            }
+        // SAFETY: F_SETFD on a kernel-supplied fd is always defined. A freshly
+        // received descriptor has no other fd flags to preserve.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }
@@ -79,41 +57,6 @@ pub(crate) mod fallback {
         } else {
             err
         }
-    }
-
-    /// Hard ceiling on the dynamic cap to bound buffer size against bogus or
-    /// `RLIM_INFINITY` values. 1M fds × 4 bytes ≈ 4 MiB cmsg buffer. This is
-    /// used as an allocation budget, not a proof against kernel truncation.
-    pub(crate) const HARD_CEILING: usize = 1 << 20;
-
-    /// Floor — never go below the Linux-style 253 cap so behaviour stays
-    /// consistent across platforms when `getrlimit` returns nonsense.
-    pub(crate) const HARD_FLOOR: usize = 253;
-
-    /// Clamp a raw `RLIMIT_NOFILE` current value into `[HARD_FLOOR,
-    /// HARD_CEILING]`, mapping `RLIM_INFINITY` and any unrepresentable value
-    /// to the ceiling. Pure — the buffer-sizing policy, split out so it is
-    /// testable without a live `getrlimit`.
-    pub(crate) fn clamp_nofile(cur: libc::rlim_t) -> usize {
-        let n: usize = if cur == libc::RLIM_INFINITY {
-            HARD_CEILING
-        } else {
-            usize::try_from(cur).unwrap_or(HARD_CEILING)
-        };
-        n.clamp(HARD_FLOOR, HARD_CEILING)
-    }
-
-    /// Receive allocation budget derived from RLIMIT_NOFILE and clamped to
-    /// bound per-call memory use. Reported truncation remains an error.
-    pub(crate) fn max_recv_fds() -> usize {
-        // SAFETY: getrlimit with a writable rlimit out-pointer is always
-        // defined; we treat any failure as "fall back to a safe default".
-        let mut rlim: libc::rlimit = unsafe { mem::zeroed() };
-        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
-        if rc < 0 {
-            return HARD_CEILING;
-        }
-        clamp_nofile(rlim.rlim_cur)
     }
 }
 
@@ -157,11 +100,19 @@ mod inner {
         Ok(())
     }
 
-    /// Linux/Android SCM_MAX_FD and the default receive budget on BSD.
-    /// BSD kernel limits may differ; truncation must still be handled.
+    /// Descriptors to reserve when a receive requests `wanted`.
+    ///
+    /// Linux and Android enforce a hard `SCM_MAX_FD` ceiling of 253 per
+    /// message, so reserving more can never prevent truncation. BSD targets
+    /// keep a 253-descriptor floor and honor larger caller requests; truncation
+    /// must still be handled.
     #[inline]
-    pub(crate) fn max_recv_fds() -> usize {
-        253
+    pub(crate) fn recv_budget(wanted: usize) -> usize {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            253
+        } else {
+            wanted.max(253)
+        }
     }
 }
 
@@ -179,7 +130,23 @@ mod inner {
     /// brief inherit-across-exec race.
     pub(crate) const RECV_FLAGS: libc::c_int = 0;
 
-    pub(crate) use super::fallback::{cloexec_fds, cloexec_received, max_recv_fds};
+    pub(crate) use super::fallback::{cloexec_fds, cloexec_received};
+
+    /// Descriptors to reserve when a receive requests `wanted`.
+    ///
+    /// XNU refuses a control message that needs more than `MCLBYTES` once its
+    /// descriptors expand to pointers (`sockargs`, bsd/kern/uipc_syscalls.c),
+    /// capping a single message at 254 descriptors. Other targets without
+    /// `MSG_CMSG_CLOEXEC` (illumos, Solaris, AIX) reserve `wanted` clamped to
+    /// `253..=1000`, keeping control storage on the stack.
+    #[inline]
+    pub(crate) fn recv_budget(wanted: usize) -> usize {
+        if cfg!(target_vendor = "apple") {
+            254
+        } else {
+            wanted.clamp(253, 1000)
+        }
+    }
 
     #[cfg(target_vendor = "apple")]
     mod send_flags {
@@ -218,15 +185,19 @@ mod inner {
         }
     }
 
-    /// Unknown Unix targets (illumos, Solaris, AIX) have no portable
-    /// `sendmsg` signal suppression in libc. Sends are not `SIGPIPE`-safe;
-    /// set `SIGPIPE` to `SIG_IGN` (or handle it) in your process, or the
-    /// kernel may terminate it on a write to a closed peer.
+    /// illumos and Solaris provide `MSG_NOSIGNAL` in libc (compile-checked
+    /// only; not tested on those kernels). Other Unix targets (such as AIX)
+    /// have no portable `sendmsg` signal suppression in libc — set `SIGPIPE`
+    /// to `SIG_IGN` or handle it in your process.
     #[cfg(not(target_vendor = "apple"))]
     mod send_flags {
         use std::io;
         use std::os::unix::io::RawFd;
 
+        #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+        pub(crate) const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+
+        #[cfg(not(any(target_os = "illumos", target_os = "solaris")))]
         pub(crate) const SEND_FLAGS: libc::c_int = 0;
 
         pub(crate) fn prepare_send(_fd: RawFd) -> io::Result<()> {
@@ -241,22 +212,17 @@ pub(crate) use inner::*;
 
 #[cfg(test)]
 mod tests {
-    use super::fallback;
+    use super::{fallback, recv_budget};
     use std::os::unix::io::AsRawFd;
 
     #[test]
-    fn clamp_nofile_maps_special_and_out_of_range_values() {
-        assert_eq!(fallback::clamp_nofile(0), fallback::HARD_FLOOR);
-        assert_eq!(fallback::clamp_nofile(10), fallback::HARD_FLOOR);
-        assert_eq!(fallback::clamp_nofile(1024), 1024);
-        assert_eq!(
-            fallback::clamp_nofile(libc::RLIM_INFINITY),
-            fallback::HARD_CEILING,
-        );
-        assert_eq!(
-            fallback::clamp_nofile(u64::MAX as libc::rlim_t),
-            fallback::HARD_CEILING,
-        );
+    fn recv_budget_respects_platform_limits() {
+        assert!(recv_budget(0) >= 253);
+        assert!(recv_budget(1) >= 253);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(recv_budget(usize::MAX), 253);
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(recv_budget(usize::MAX), 254);
     }
 
     #[test]
